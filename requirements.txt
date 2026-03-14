@@ -1,0 +1,27 @@
+# ============================================
+# RAG-based Legal Document Comparison
+# ============================================
+
+# --- Pha A: Ingest & Chunking ---
+python-docx==1.2.0           # Đọc file DOCX
+pdfplumber==0.11.9           # Đọc file PDF (dự phòng)
+
+# --- Pha A: Embedding & Word Segmentation ---
+sentence-transformers==5.2.3 # Load embedding model (DEK21_wseg)
+pyvi==0.1.1                  # ViTokenizer - word segmentation tiếng Việt
+torch==2.6.0+cu124           # PyTorch with CUDA 12.4
+
+# --- Pha A: Vector Store ---
+chromadb==1.5.2              # Chroma vector database (persistent)
+
+# --- Pha C: Local LLM ---
+ollama==0.6.1                # Ollama Python client (gọi Qwen2.5)
+
+# --- Pha D: UI ---
+streamlit==1.54.0            # Web UI
+
+# --- Utilities ---
+tqdm==4.67.3                 # Progress bars
+pydantic==2.12.5             # Data validation & schema
+python-dotenv==1.2.2         # Environment config
+loguru==0.7.3                # Logging
