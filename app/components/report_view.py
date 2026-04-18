@@ -77,6 +77,27 @@ def render_change_list(comparison_results: list[dict]):
             if item.get('conclusion'):
                 st.markdown(f"> {item['conclusion']}")
 
+            # Full side-by-side content
+            if item.get('text_v1') or item.get('text_v2'):
+                st.markdown("**Noi dung day du V1 / V2:**")
+                left, right = st.columns(2)
+                with left:
+                    st.text_area(
+                        "V1 (cu)",
+                        value=item.get('text_v1', '(khong co)'),
+                        height=250,
+                        disabled=True,
+                        key=f"full_v1_{item['article_number']}",
+                    )
+                with right:
+                    st.text_area(
+                        "V2 (moi)",
+                        value=item.get('text_v2') or '(khong tim thay)',
+                        height=250,
+                        disabled=True,
+                        key=f"full_v2_{item['article_number']}",
+                    )
+
             # Evidence excerpts
             if item.get('evidence'):
                 st.markdown("**Trich doan thay doi:**")
