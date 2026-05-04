@@ -34,6 +34,46 @@ def diff_excerpt(text: str, start: int, end: int, window: int = 120) -> str:
     return shorten(text[left:right].strip(), max_len=300)
 
 
+def _split_lines(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return str(text).splitlines()
+
+
+def build_diff_blocks(
+    before_text: str | None,
+    after_text: str | None,
+    max_text_len: int = 900,
+) -> list[dict]:
+    """Build deterministic line-level diff blocks for LLM annotation and UI."""
+    before_lines = _split_lines(before_text)
+    after_lines = _split_lines(after_text)
+    matcher = difflib.SequenceMatcher(None, before_lines, after_lines)
+    blocks = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+        before_block = "\n".join(before_lines[i1:i2]).strip()
+        after_block = "\n".join(after_lines[j1:j2]).strip()
+        if tag == 'delete':
+            block_tag = 'removed'
+        elif tag == 'insert':
+            block_tag = 'added'
+        else:
+            block_tag = 'changed'
+        blocks.append({
+            'block_id': f"B{len(blocks) + 1}",
+            'tag': block_tag,
+            'v1_lines': list(range(i1 + 1, i2 + 1)),
+            'v2_lines': list(range(j1 + 1, j2 + 1)),
+            'before': shorten(before_block, max_text_len),
+            'after': shorten(after_block, max_text_len),
+        })
+
+    return blocks
+
+
 # ── Evidence extraction ──────────────────────────────────────────────
 
 def extract_evidence(
@@ -110,6 +150,39 @@ def _normalize_evidence_items(evidence: list[dict], max_items: int = 3) -> list[
     return normalized
 
 
+def _normalize_diff_annotations(
+    annotations: list[dict], diff_blocks: list[dict], max_items: int = 8,
+) -> list[dict]:
+    blocks_by_id = {block['block_id']: block for block in diff_blocks}
+    normalized = []
+    for item in annotations or []:
+        if not isinstance(item, dict):
+            continue
+        block_id = str(item.get('block_id') or '').strip()
+        block = blocks_by_id.get(block_id)
+        if not block:
+            continue
+        summary = shorten(str(item.get('summary') or ''), 300)
+        legal_effect = shorten(str(item.get('legal_effect') or ''), 400)
+        severity = str(item.get('severity') or 'unknown').strip().lower()
+        if severity not in {'low', 'medium', 'high', 'unknown'}:
+            severity = 'unknown'
+        if not summary and not legal_effect:
+            continue
+        normalized.append({
+            'block_id': block_id,
+            'tag': block.get('tag', 'changed'),
+            'v1_lines': block.get('v1_lines', []),
+            'v2_lines': block.get('v2_lines', []),
+            'summary': summary,
+            'legal_effect': legal_effect,
+            'severity': severity,
+        })
+        if len(normalized) >= max_items:
+            break
+    return normalized
+
+
 def enforce_no_evidence_no_conclusion(
     status: str, conclusion: str, evidence: list[dict],
     before_norm: str, after_norm: str,
@@ -155,17 +228,33 @@ def llm_compare_article(
 ) -> dict:
     before_norm = normalize_ws(before_text or '')
     after_norm = normalize_ws(after_text or '')
+    diff_blocks = [] if before_norm == after_norm else build_diff_blocks(before_text, after_text)
 
     if before_norm == after_norm:
         return {
             'status': 'unchanged',
             'conclusion': 'Khong ghi nhan khac biet ve mat van ban.',
             'evidence': [],
+            'diff_blocks': [],
+            'diff_annotations': [],
             'llm_model': None,
             'llm_used': False,
             'fallback_reason': 'texts_equal',
             'grounded': True,
         }
+
+    prompt_diff_blocks = [
+        {
+            'block_id': block['block_id'],
+            'tag': block['tag'],
+            'v1_lines': block['v1_lines'],
+            'v2_lines': block['v2_lines'],
+            'before': shorten(block.get('before', ''), 600),
+            'after': shorten(block.get('after', ''), 600),
+        }
+        for block in diff_blocks[:8]
+    ]
+    diff_blocks_json = json.dumps(prompt_diff_blocks, ensure_ascii=False, indent=2)
 
     prompt = f"""
 Ban la tro ly doi chieu hop dong. So sanh 2 PHIEN BAN cua CUNG MOT DIEU.
@@ -174,12 +263,15 @@ Muc tieu:
 - Xac dinh trang thai thay doi.
 - Dua ra ket luan ngan gon.
 - Trich dan bang chung tu chinh van ban da cho.
+- Giai thich y nghia cua tung block thay doi da duoc code xac dinh san.
 
 QUY TAC BAT BUOC:
 1) Chi su dung noi dung trong 'Dieu v1' va 'Dieu v2'. Khong bo sung kien thuc ngoai.
 2) Trang thai CHI duoc la mot trong: unchanged, changed, added, removed.
 3) Neu khong tim thay bang chung text ro rang, evidence phai de rong va conclusion ghi ro "Khong du bang chung de ket luan".
-4) Tra ve DUY NHAT JSON dung schema, KHONG them markdown hay giai thich.
+4) diff_annotations CHI duoc tham chieu block_id co trong DIFF_BLOCKS. Khong tu tao block_id moi.
+5) severity CHI duoc la low, medium, high, unknown.
+6) Tra ve DUY NHAT JSON dung schema, KHONG them markdown hay giai thich.
 
 SCHEMA JSON:
 {{
@@ -187,6 +279,14 @@ SCHEMA JSON:
   "conclusion": "string",
   "evidence": [
     {{"tag": "changed|added|removed", "before": "string", "after": "string"}}
+  ],
+  "diff_annotations": [
+    {{
+      "block_id": "B1",
+      "summary": "string tom tat block thay doi",
+      "legal_effect": "string neu tac dong phap ly/nghia vu/quyen loi; neu khong ro thi ghi unknown",
+      "severity": "low|medium|high|unknown"
+    }}
   ]
 }}
 
@@ -199,6 +299,9 @@ Dieu v1:
 
 Dieu v2:
 {after_norm or '(khong co)'}
+
+DIFF_BLOCKS do he thong xac dinh san:
+{diff_blocks_json}
 """.strip()
 
     if ollama is None:
@@ -210,6 +313,7 @@ Dieu v2:
         )
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
+            'diff_blocks': diff_blocks, 'diff_annotations': [],
             'llm_model': None, 'llm_used': False,
             'fallback_reason': 'missing_ollama_package', 'grounded': grounded,
         }
@@ -228,12 +332,18 @@ Dieu v2:
         status = parsed.get('status')
         conclusion = parsed.get('conclusion') or ''
         evidence = parsed.get('evidence') if isinstance(parsed.get('evidence'), list) else []
+        annotations = (
+            parsed.get('diff_annotations')
+            if isinstance(parsed.get('diff_annotations'), list) else []
+        )
 
         status, conclusion, evidence, grounded = enforce_no_evidence_no_conclusion(
             status, conclusion, evidence, before_norm, after_norm,
         )
+        diff_annotations = _normalize_diff_annotations(annotations, diff_blocks)
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
+            'diff_blocks': diff_blocks, 'diff_annotations': diff_annotations,
             'llm_model': model, 'llm_used': True,
             'fallback_reason': None, 'grounded': grounded,
         }
@@ -246,6 +356,7 @@ Dieu v2:
         )
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
+            'diff_blocks': diff_blocks, 'diff_annotations': [],
             'llm_model': model, 'llm_used': False,
             'fallback_reason': str(exc), 'grounded': grounded,
         }

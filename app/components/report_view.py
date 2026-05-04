@@ -1,5 +1,8 @@
 """Reusable UI components for rendering comparison reports."""
 
+import difflib
+import html
+
 import pandas as pd
 import streamlit as st
 
@@ -19,6 +22,228 @@ STATUS_LABELS = {
     'added': 'Them moi',
     'removed': 'Xoa bo',
 }
+
+
+# ── Side-by-side diff ─────────────────────────────────────────────────
+
+def _split_lines(text: str | None) -> list[str]:
+    if not text:
+        return []
+    return str(text).splitlines()
+
+
+def _build_line_diff_rows(v1_text: str | None, v2_text: str | None) -> list[dict]:
+    """Build aligned line-level diff rows for side-by-side rendering."""
+    v1_lines = _split_lines(v1_text)
+    v2_lines = _split_lines(v2_text)
+    matcher = difflib.SequenceMatcher(None, v1_lines, v2_lines)
+    rows = []
+    block_seq = 1
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for offset in range(i2 - i1):
+                rows.append({
+                    'op': 'equal',
+                    'block_id': '',
+                    'v1_no': i1 + offset + 1,
+                    'v1_text': v1_lines[i1 + offset],
+                    'v2_no': j1 + offset + 1,
+                    'v2_text': v2_lines[j1 + offset],
+                })
+            continue
+
+        block_id = f"B{block_seq}"
+        block_seq += 1
+
+        if tag == 'delete':
+            for idx in range(i1, i2):
+                rows.append({
+                    'op': 'delete',
+                    'block_id': block_id,
+                    'v1_no': idx + 1,
+                    'v1_text': v1_lines[idx],
+                    'v2_no': '',
+                    'v2_text': '',
+                })
+            continue
+
+        if tag == 'insert':
+            for idx in range(j1, j2):
+                rows.append({
+                    'op': 'insert',
+                    'block_id': block_id,
+                    'v1_no': '',
+                    'v1_text': '',
+                    'v2_no': idx + 1,
+                    'v2_text': v2_lines[idx],
+                })
+            continue
+
+        max_len = max(i2 - i1, j2 - j1)
+        for offset in range(max_len):
+            left_idx = i1 + offset
+            right_idx = j1 + offset
+            rows.append({
+                'op': 'replace',
+                'block_id': block_id,
+                'v1_no': left_idx + 1 if left_idx < i2 else '',
+                'v1_text': v1_lines[left_idx] if left_idx < i2 else '',
+                'v2_no': right_idx + 1 if right_idx < j2 else '',
+                'v2_text': v2_lines[right_idx] if right_idx < j2 else '',
+            })
+
+    return rows
+
+
+def render_side_by_side_diff(item: dict):
+    """Render v1/v2 article text with line-level highlights."""
+    v1_text = item.get('v1_text')
+    v2_text = item.get('v2_text')
+    if not v1_text and not v2_text:
+        return
+
+    rows = _build_line_diff_rows(v1_text, v2_text)
+    if not rows:
+        st.info("Khong co noi dung de hien thi.")
+        return
+
+    html_rows = []
+    for row in rows:
+        op = html.escape(str(row['op']))
+        block_id = html.escape(str(row.get('block_id') or ''))
+        html_rows.append(
+            '<tr class="diff-row diff-{op}">'
+            '<td class="line-no">{block_badge}{v1_no}</td>'
+            '<td class="line-text">{v1_text}</td>'
+            '<td class="line-no">{v2_no}</td>'
+            '<td class="line-text">{v2_text}</td>'
+            '</tr>'.format(
+                op=op,
+                block_badge=(
+                    f'<span class="block-badge">{block_id}</span>' if block_id else ''
+                ),
+                v1_no=html.escape(str(row['v1_no'])),
+                v1_text=html.escape(row['v1_text']),
+                v2_no=html.escape(str(row['v2_no'])),
+                v2_text=html.escape(row['v2_text']),
+            )
+        )
+
+    st.markdown(
+        """
+<style>
+.side-by-side-diff {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+.side-by-side-diff table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  font-size: 0.9rem;
+}
+.side-by-side-diff th {
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  color: #334155;
+  padding: 8px;
+  position: sticky;
+  text-align: left;
+  top: 0;
+  z-index: 1;
+}
+.side-by-side-diff td {
+  border-bottom: 1px solid #f1f5f9;
+  padding: 7px 8px;
+  vertical-align: top;
+}
+.side-by-side-diff .line-no {
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: right;
+  user-select: none;
+  width: 48px;
+}
+.side-by-side-diff .block-badge {
+  background: #e0f2fe;
+  border: 1px solid #bae6fd;
+  border-radius: 999px;
+  color: #0369a1;
+  display: inline-block;
+  font-size: 0.72rem;
+  margin-right: 4px;
+  padding: 1px 5px;
+}
+.side-by-side-diff .line-text {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.side-by-side-diff .diff-delete td:nth-child(1),
+.side-by-side-diff .diff-delete td:nth-child(2) {
+  background: #fee2e2;
+}
+.side-by-side-diff .diff-insert td:nth-child(3),
+.side-by-side-diff .diff-insert td:nth-child(4) {
+  background: #dcfce7;
+}
+.side-by-side-diff .diff-replace td {
+  background: #fef3c7;
+}
+.side-by-side-diff .diff-equal td {
+  background: #ffffff;
+}
+</style>
+<div class="side-by-side-diff">
+  <table>
+    <thead>
+      <tr>
+        <th class="line-no">#</th>
+        <th>V1 (cu)</th>
+        <th class="line-no">#</th>
+        <th>V2 (moi)</th>
+      </tr>
+    </thead>
+    <tbody>
+      __DIFF_ROWS__
+    </tbody>
+  </table>
+</div>
+""".replace("__DIFF_ROWS__", "\n".join(html_rows)),
+        unsafe_allow_html=True,
+    )
+
+
+def _format_line_refs(lines) -> str:
+    if not lines:
+        return "-"
+    return ", ".join(str(line) for line in lines)
+
+
+def render_diff_annotations(item: dict):
+    """Render LLM explanations attached to deterministic diff blocks."""
+    annotations = item.get('diff_annotations') or []
+    if not annotations:
+        return
+
+    st.markdown("**Phan tich LLM theo block thay doi:**")
+    for ann in annotations:
+        block_id = ann.get('block_id', '')
+        tag = ann.get('tag', 'changed')
+        severity = ann.get('severity', 'unknown')
+        v1_lines = _format_line_refs(ann.get('v1_lines'))
+        v2_lines = _format_line_refs(ann.get('v2_lines'))
+
+        with st.container(border=True):
+            st.markdown(f"**{block_id}** · `{tag}` · Muc do: `{severity}`")
+            st.caption(f"V1 dong: {v1_lines} | V2 dong: {v2_lines}")
+            if ann.get('summary'):
+                st.markdown(f"**Tom tat:** {ann['summary']}")
+            if ann.get('legal_effect'):
+                st.markdown(f"**Y nghia/tac dong:** {ann['legal_effect']}")
 
 
 # ── Overview metrics ─────────────────────────────────────────────────
@@ -78,25 +303,11 @@ def render_change_list(comparison_results: list[dict]):
                 st.markdown(f"> {item['conclusion']}")
 
             # Full side-by-side content
-            if item.get('text_v1') or item.get('text_v2'):
+            if item.get('v1_text') or item.get('v2_text'):
                 st.markdown("**Noi dung day du V1 / V2:**")
-                left, right = st.columns(2)
-                with left:
-                    st.text_area(
-                        "V1 (cu)",
-                        value=item.get('text_v1', '(khong co)'),
-                        height=250,
-                        disabled=True,
-                        key=f"full_v1_{item['article_number']}",
-                    )
-                with right:
-                    st.text_area(
-                        "V2 (moi)",
-                        value=item.get('text_v2') or '(khong tim thay)',
-                        height=250,
-                        disabled=True,
-                        key=f"full_v2_{item['article_number']}",
-                    )
+                render_side_by_side_diff(item)
+
+            render_diff_annotations(item)
 
             # Evidence excerpts
             if item.get('evidence'):
