@@ -384,20 +384,37 @@ def compare_articles_with_vector_retrieval(
 
     for article_no in left_numbers:
         left = left_articles[article_no]
-        candidates = query_candidates_for_article(
-            left['full_text'], target_version='v2',
-            chroma_dir=chroma_dir, embedder=embedder,
-            collection_name=collection_name, top_k=top_k,
-        )
 
+        # ── Priority 1: exact article_number match ───────────────────
         chosen = None
-        for cand in candidates:
-            cand_article_no = cand.get('article_number')
-            if not cand_article_no or cand_article_no in matched_right:
-                continue
-            if cand['similarity'] >= threshold:
-                chosen = cand
-                break
+        if article_no in right_articles and article_no not in matched_right:
+            right_same = right_articles[article_no]
+            chosen = {
+                'article_number': article_no,
+                'article_title': right_same['article_title'],
+                'text': right_same['full_text'],
+                'similarity': 1.0,
+                'distance': 0.0,
+            }
+
+        # ── Priority 2: vector search for articles without same-number match ──
+        if chosen is None:
+            candidates = query_candidates_for_article(
+                left['full_text'], target_version='v2',
+                chroma_dir=chroma_dir, embedder=embedder,
+                collection_name=collection_name, top_k=top_k,
+            )
+            for cand in candidates:
+                cand_article_no = cand.get('article_number')
+                if not cand_article_no or cand_article_no in matched_right:
+                    continue
+                # Skip exact-number matches already in right_articles to avoid
+                # cross-version number collisions
+                if cand_article_no in right_articles and cand_article_no != article_no:
+                    continue
+                if cand['similarity'] >= threshold:
+                    chosen = cand
+                    break
 
         if chosen is None:
             llm_result = llm_compare_article(

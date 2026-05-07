@@ -65,6 +65,42 @@ def _is_contract_section_heading(line):
     return _looks_upper_heading(s) or _looks_title_heading(s)
 
 
+# Common Vietnamese sentence starters that indicate body text (not section titles)
+_VI_BODY_OPENERS = {
+    'các', 'mọi', 'nếu', 'khi', 'theo', 'với', 'để', 'trong', 'do', 'vì',
+    'bởi', 'tuy', 'mặc', 'dù', 'nhưng', 'và', 'hoặc', 'việc', 'sự', 'những',
+    'một', 'hai', 'ba', 'quy', 'qui', 'điều', 'khoản', 'trường', 'trừ',
+    'căn', 'dựa', 'theo', 'sau', 'trước', 'trong', 'tại', 'đối',
+}
+
+
+def _looks_vi_section_title(line: str) -> bool:
+    """Detect a standalone unnumbered section heading in Vietnamese DOCX context.
+
+    Used for paragraphs with no heading_level and no numbering_label that appear
+    inside a numbered-article document (i.e., added without proper Word styling).
+    """
+    s = line.strip()
+    if not s:
+        return False
+    # Must not end with sentence-ending punctuation
+    if s[-1] in '.;,?!:':
+        return False
+    # Must not contain parentheses (often inline expressions, not titles)
+    if '(' in s or ')' in s:
+        return False
+    words = s.split()
+    if len(words) < 2 or len(words) > 12:
+        return False
+    # First word must start with uppercase (Vietnamese title style: only first word caps)
+    if not words[0][0].isupper():
+        return False
+    # Must not start with a known body-text opener
+    if words[0].lower() in _VI_BODY_OPENERS:
+        return False
+    return True
+
+
 # ── Khoan/Diem extraction ───────────────────────────────────────────
 
 def _extract_khoan_items(body_lines):
@@ -141,6 +177,8 @@ def _chunk_docx_headings(document, doc_id, version):
     paragraphs = document.get("paragraphs", [])
     chunks, chunk_idx = [], 1
     article_state, current_khoan, current_tieu_muc = None, None, None
+    auto_sec_idx = 0  # counter for auto-numbered unnumbered sections
+    has_seen_numbered = False  # flag: we've entered at least one numbered article
 
     def flush():
         nonlocal article_state, current_khoan, current_tieu_muc, chunk_idx
@@ -171,6 +209,7 @@ def _chunk_docx_headings(document, doc_id, version):
 
         if hl == 1 and nl:
             flush()
+            has_seen_numbered = True
             article_state = {
                 "article_number": np_[0] if np_ else nl.rstrip("."),
                 "article_title": _clean_heading(text),
@@ -181,6 +220,34 @@ def _chunk_docx_headings(document, doc_id, version):
             continue
         if article_state is None:
             continue
+
+        # Unnumbered H1 heading (heading style but no list number)
+        if hl == 1 and not nl:
+            flush()
+            auto_sec_idx += 1
+            article_state = {
+                "article_number": f"S{auto_sec_idx}",
+                "article_title": _clean_heading(text),
+                "heading_display": dt.strip(),
+                "body_lines": [],
+                "khoan_items": [],
+            }
+            continue
+
+        # Plain-text paragraph that looks like a standalone Vietnamese section title
+        # (added without Word heading style - common when editing DOCX manually)
+        if hl is None and not nl and has_seen_numbered and _looks_vi_section_title(text):
+            flush()
+            auto_sec_idx += 1
+            article_state = {
+                "article_number": f"S{auto_sec_idx}",
+                "article_title": _clean_heading(text),
+                "heading_display": dt.strip(),
+                "body_lines": [],
+                "khoan_items": [],
+            }
+            continue
+
         if hl == 2 and nl:
             current_khoan = {
                 "khoan_number": nl.rstrip("."),

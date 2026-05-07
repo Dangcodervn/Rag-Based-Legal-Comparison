@@ -19,18 +19,24 @@ def article_sort_key(article_no: str):
 
 
 def build_articles_from_chunks(chunks: list[dict]) -> dict[str, dict]:
-    """Group chunks into a dict keyed by article_number."""
+    """Group chunks into a dict keyed by article_number, concatenating text if multiple chunks share the same number."""
     articles = {}
     for row in chunks:
         article_no = str(row.get('article_number') or '').strip()
         if not article_no:
             continue
-        articles[article_no] = {
-            'article_number': article_no,
-            'article_title': row.get('article_title', f'Dieu {article_no}'),
-            'full_text': row.get('text', ''),
-            'chunk_id': row.get('chunk_id', ''),
-        }
+        if article_no not in articles:
+            articles[article_no] = {
+                'article_number': article_no,
+                'article_title': row.get('article_title', f'Dieu {article_no}'),
+                'full_text': row.get('text', ''),
+                'chunk_id': row.get('chunk_id', ''),
+            }
+        else:
+            # Concatenate text for multi-chunk articles
+            extra = row.get('text', '').strip()
+            if extra and extra not in articles[article_no]['full_text']:
+                articles[article_no]['full_text'] += '\n' + extra
     return articles
 
 
