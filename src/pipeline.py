@@ -16,6 +16,7 @@ from configs.defaults import (
     EMBEDDING_MODEL,
     CHROMA_COLLECTION,
     OLLAMA_MODEL,
+    COSINE_LOW,
 )
 
 
@@ -28,7 +29,7 @@ def run_comparison_pipeline(
     embed_model: str = EMBEDDING_MODEL,
     collection_name: str = CHROMA_COLLECTION,
     top_k: int = 3,
-    threshold: float = 0.50,
+    threshold: float = COSINE_LOW,
     hf_token: str | None = None,
     on_progress: Callable[[str, float], None] | None = None,
 ) -> dict:

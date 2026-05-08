@@ -17,6 +17,7 @@ from src.retriever import (
     build_articles_from_chunks,
     query_candidates_for_article,
 )
+from configs.defaults import COSINE_LOW
 
 
 # ── Text helpers ─────────────────────────────────────────────────────
@@ -372,7 +373,7 @@ def compare_articles_with_vector_retrieval(
     llm_model: str = "qwen2.5:7b-instruct-q4_K_M",
     collection_name: str = "legal_chunks",
     top_k: int = 3,
-    threshold: float = 0.50,
+    threshold: float = COSINE_LOW,
 ) -> list[dict]:
     """Compare two sets of chunks using vector retrieval + LLM."""
     left_articles = build_articles_from_chunks(chunks_v1)

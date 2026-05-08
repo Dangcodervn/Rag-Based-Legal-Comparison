@@ -176,7 +176,14 @@ def _build_chunk(
 def _chunk_docx_headings(document, doc_id, version):
     paragraphs = document.get("paragraphs", [])
     chunks, chunk_idx = [], 1
-    article_state, current_khoan, current_tieu_muc = None, None, None
+    article_state = {
+        "article_number": "0",
+        "article_title": "Phần mở đầu",
+        "heading_display": "",
+        "body_lines": [],
+        "khoan_items": [],
+    }
+    current_khoan, current_tieu_muc = None, None
     auto_sec_idx = 0  # counter for auto-numbered unnumbered sections
     has_seen_numbered = False  # flag: we've entered at least one numbered article
 
@@ -217,8 +224,6 @@ def _chunk_docx_headings(document, doc_id, version):
                 "body_lines": [],
                 "khoan_items": [],
             }
-            continue
-        if article_state is None:
             continue
 
         # Unnumbered H1 heading (heading style but no list number)
@@ -301,6 +306,24 @@ def _chunk_plain_text(text, doc_id, version):
     cur_no = cur_cid = None
     cur_head, cur_title, cur_body = [], [], []
     preamble_done = False
+
+    # ── Pre-pass: collect preamble before first Điều/Chương/Mục ─────
+    first_structural = next(
+        (i for i, l in enumerate(lines)
+         if DIEU_RE.match(l.strip()) or CHUONG_RE.match(l.strip()) or MUC_RE.match(l.strip())),
+        None,
+    )
+    if first_structural and first_structural > 0:
+        preamble_text = "\n".join(lines[:first_structural]).strip()
+        if preamble_text:
+            chunks.append(_build_chunk(
+                chunk_idx=chunk_idx, doc_id=doc_id, version=version,
+                chuong_so="0", muc_so="0", clause_id="article_0",
+                article_number="0", article_title="Phần mở đầu",
+                text=preamble_text, khoan_items=[],
+            ))
+            chunk_idx += 1
+        lines = lines[first_structural:]
 
     def start(heading, article_number=None, title_text=None):
         nonlocal cur_no, cur_cid, cur_head, cur_title, cur_body, section_seq
