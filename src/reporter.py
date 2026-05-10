@@ -13,7 +13,8 @@ def build_summary_df(comparison_results: list[dict]) -> pd.DataFrame:
     """Build a summary DataFrame from comparison results."""
     return pd.DataFrame([
         {
-            'Dieu v1': item['article_number'],
+            'Dieu': item.get('dieu_number') or item['article_number'],
+            'Khoan': item.get('khoan_number') or '0',
             'Dieu v2 match': item.get('matched_article_v2') or '(khong tim thay)',
             'Match score': item.get('match_score', 0.0),
             'Tieu de': item.get('article_title', ''),
@@ -33,7 +34,8 @@ def build_citation_df(comparison_results: list[dict]) -> pd.DataFrame:
             continue
         if not item.get('evidence'):
             rows.append({
-                'Dieu v1': item['article_number'],
+                'Dieu': item.get('dieu_number') or item['article_number'],
+                'Khoan': item.get('khoan_number') or '0',
                 'Dieu v2 match': item.get('matched_article_v2') or '(khong tim thay)',
                 'Loai': 'No evidence',
                 'V1': '',
@@ -42,7 +44,8 @@ def build_citation_df(comparison_results: list[dict]) -> pd.DataFrame:
             continue
         for ev in item['evidence']:
             rows.append({
-                'Dieu v1': item['article_number'],
+                'Dieu': item.get('dieu_number') or item['article_number'],
+                'Khoan': item.get('khoan_number') or '0',
                 'Dieu v2 match': item.get('matched_article_v2') or '(khong tim thay)',
                 'Loai': ev.get('tag', 'changed'),
                 'V1': ev.get('before', ''),
@@ -61,7 +64,7 @@ def build_report(comparison_results: list[dict], config: dict) -> dict:
         'config': {
             **config,
             'principle': 'Khong bang chung -> khong ket luan',
-            'total_articles': len(comparison_results),
+            'total_khoans': len(comparison_results),
             'status_counts': dict(status_counts),
             'llm_used_count': llm_used_count,
             'fallback_count': len(comparison_results) - llm_used_count,

@@ -31,6 +31,8 @@ def build_articles_from_chunks(chunks: list[dict]) -> dict[str, dict]:
                 'article_title': row.get('article_title', f'Dieu {article_no}'),
                 'full_text': row.get('text', ''),
                 'chunk_id': row.get('chunk_id', ''),
+                'dieu_number': str(row.get('dieu_number') or article_no),
+                'khoan_number': str(row.get('khoan_number') or '0'),
             }
         else:
             # Concatenate text for multi-chunk articles

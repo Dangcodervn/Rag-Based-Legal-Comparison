@@ -217,42 +217,13 @@ def render_side_by_side_diff(item: dict):
     )
 
 
-def _format_line_refs(lines) -> str:
-    if not lines:
-        return "-"
-    return ", ".join(str(line) for line in lines)
-
-
-def render_diff_annotations(item: dict):
-    """Render LLM explanations attached to deterministic diff blocks."""
-    annotations = item.get('diff_annotations') or []
-    if not annotations:
-        return
-
-    st.markdown("**Phan tich LLM theo block thay doi:**")
-    for ann in annotations:
-        block_id = ann.get('block_id', '')
-        tag = ann.get('tag', 'changed')
-        severity = ann.get('severity', 'unknown')
-        v1_lines = _format_line_refs(ann.get('v1_lines'))
-        v2_lines = _format_line_refs(ann.get('v2_lines'))
-
-        with st.container(border=True):
-            st.markdown(f"**{block_id}** · `{tag}` · Muc do: `{severity}`")
-            st.caption(f"V1 dong: {v1_lines} | V2 dong: {v2_lines}")
-            if ann.get('summary'):
-                st.markdown(f"**Tom tat:** {ann['summary']}")
-            if ann.get('legal_effect'):
-                st.markdown(f"**Y nghia/tac dong:** {ann['legal_effect']}")
-
-
 # ── Overview metrics ─────────────────────────────────────────────────
 
 def render_metrics(report: dict):
     """Display top-level summary metrics."""
     cfg = report.get('config', {})
     status = cfg.get('status_counts', {})
-    total = cfg.get('total_articles', 0)
+    total = cfg.get('total_khoans') or cfg.get('total_articles', 0)
 
     changed = status.get('changed', 0)
     added = status.get('added', 0)
@@ -260,7 +231,7 @@ def render_metrics(report: dict):
     unchanged = status.get('unchanged', 0)
 
     cols = st.columns(4)
-    cols[0].metric("Tong so Dieu", total)
+    cols[0].metric("Tong so Khoan", total)
     cols[1].metric("🟡 Sua doi", changed)
     cols[2].metric("🔵 Them moi / 🔴 Xoa bo", f"{added} / {removed}")
     cols[3].metric("🟢 Khong doi", unchanged)
@@ -279,10 +250,13 @@ def render_change_list(comparison_results: list[dict]):
     for item in changes:
         icon = STATUS_ICONS.get(item['status'], '⚪')
         label = STATUS_LABELS.get(item['status'], item['status'])
-        article = item['article_number']
+        dieu = item.get('dieu_number') or item.get('article_number', '')
+        khoan = item.get('khoan_number', '0')
         title = item.get('article_title', '')
 
-        header = f"{icon} **[{label}]** {article}"
+        header = f"{icon} **[{label}]** Dieu {dieu}"
+        if khoan and khoan != '0':
+            header += f" · Khoan {khoan}"
         if title:
             header += f" — {title}"
 
@@ -306,8 +280,6 @@ def render_change_list(comparison_results: list[dict]):
             if item.get('v1_text') or item.get('v2_text'):
                 st.markdown("**Noi dung day du V1 / V2:**")
                 render_side_by_side_diff(item)
-
-            render_diff_annotations(item)
 
             # Evidence excerpts
             if item.get('evidence'):
@@ -346,11 +318,13 @@ def render_key_summary(comparison_results: list[dict]):
             continue
         icon = STATUS_ICONS[status]
         label = STATUS_LABELS[status]
-        st.markdown(f"### {icon} {label} ({len(items)} dieu)")
+        st.markdown(f"### {icon} {label} ({len(items)} khoan)")
         for item in items:
-            article = item['article_number']
+            dieu = item.get('dieu_number') or item.get('article_number', '')
+            khoan = item.get('khoan_number', '0')
+            ref = f"Dieu {dieu} · Khoan {khoan}" if khoan and khoan != '0' else f"Dieu {dieu}"
             conclusion = item.get('conclusion', '(khong co ket luan)')
-            st.markdown(f"- **{article}**: {conclusion}")
+            st.markdown(f"- **{ref}**: {conclusion}")
 
 
 # ── 3. Citation / excerpt table ──────────────────────────────────────
@@ -363,7 +337,8 @@ def render_citations(comparison_results: list[dict]):
             continue
         if not item.get('evidence'):
             rows.append({
-                'Dieu': item['article_number'],
+                'Dieu': item.get('dieu_number') or item.get('article_number', ''),
+                'Khoan': item.get('khoan_number', '0'),
                 'Trang thai': f"{STATUS_ICONS.get(item['status'],'')} {item['status']}",
                 'Loai': '—',
                 'Trich doan V1': '(khong co bang chung)',
@@ -372,7 +347,8 @@ def render_citations(comparison_results: list[dict]):
             continue
         for ev in item['evidence']:
             rows.append({
-                'Dieu': item['article_number'],
+                'Dieu': item.get('dieu_number') or item.get('article_number', ''),
+                'Khoan': item.get('khoan_number', '0'),
                 'Trang thai': f"{STATUS_ICONS.get(item['status'],'')} {item['status']}",
                 'Loai': ev.get('tag', 'changed'),
                 'Trich doan V1': ev.get('before', ''),
@@ -384,3 +360,111 @@ def render_citations(comparison_results: list[dict]):
         return
 
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ── 4. Full document side-by-side view ──────────────────────────────
+
+_STATUS_BG = {
+    'changed':   '#fef9c3',   # yellow-100
+    'added':     '#dbeafe',   # blue-100
+    'removed':   '#fee2e2',   # red-100
+    'unchanged': '#ffffff',
+}
+_STATUS_BORDER = {
+    'changed':   '#fbbf24',
+    'added':     '#60a5fa',
+    'removed':   '#f87171',
+    'unchanged': '#e5e7eb',
+}
+
+
+def _doc_block(dieu: str, khoan: str, title: str, text: str, status: str, side: str) -> str:
+    """Render one article/khoan block as an HTML card for the document view."""
+    bg     = _STATUS_BG.get(status, '#ffffff')
+    border = _STATUS_BORDER.get(status, '#e5e7eb')
+    icon   = STATUS_ICONS.get(status, '')
+    label  = STATUS_LABELS.get(status, status)
+
+    khoan_badge = f'<span style="font-size:0.75rem;color:#64748b;">Khoản {khoan}</span>' if khoan and khoan != '0' else ''
+    empty_note  = '<span style="color:#94a3b8;font-style:italic;">(không có nội dung)</span>' if not text else ''
+    body        = html.escape(text).replace('\n', '<br>') if text else ''
+
+    return (
+        f'<div style="'
+        f'background:{bg};border:1.5px solid {border};border-radius:8px;'
+        f'padding:0.75rem 1rem;margin-bottom:0.6rem;'
+        f'">'
+        f'<div style="display:flex;align-items:baseline;gap:0.5rem;margin-bottom:0.35rem;">'
+        f'<span style="font-weight:700;font-size:0.85rem;">Điều {dieu}</span>'
+        f'{khoan_badge}'
+        f'<span style="flex:1;font-size:0.8rem;color:#475569;">{html.escape(title)}</span>'
+        f'<span style="font-size:0.72rem;color:#64748b;">{icon} {label}</span>'
+        f'</div>'
+        f'<div style="font-size:0.83rem;line-height:1.55;white-space:pre-wrap;word-break:break-word;">'
+        f'{body}{empty_note}'
+        f'</div>'
+        f'</div>'
+    )
+
+
+def render_document_view(comparison_results: list[dict]):
+    """Render full V1 and V2 documents side by side, colour-coded by change status."""
+    import re as _re
+
+    def _sort_key(item):
+        def _num(s):
+            m = _re.match(r'^(\d+)', str(s or '0'))
+            return int(m.group(1)) if m else 0
+        return (_num(item.get('dieu_number', 0)), _num(item.get('khoan_number', 0)))
+
+    items = sorted(comparison_results, key=_sort_key)
+
+    # Legend
+    st.markdown(
+        ' &nbsp; '.join(
+            f'<span style="background:{_STATUS_BG[s]};border:1px solid {_STATUS_BORDER[s]};'
+            f'border-radius:4px;padding:2px 8px;font-size:0.8rem;">'
+            f'{STATUS_ICONS[s]} {STATUS_LABELS[s]}</span>'
+            for s in ['changed', 'added', 'removed', 'unchanged']
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='margin-bottom:0.8rem'></div>", unsafe_allow_html=True)
+
+    col_v1, col_v2 = st.columns(2, gap="small")
+
+    v1_blocks, v2_blocks = [], []
+    for item in items:
+        dieu  = str(item.get('dieu_number') or item.get('article_number', ''))
+        khoan = str(item.get('khoan_number', '0'))
+        title = item.get('article_title', '')
+        status = item.get('status', 'unchanged')
+
+        v1_text = item.get('v1_text', '')
+        v2_text = item.get('v2_text', '')
+
+        # For added items V1 is empty; for removed items V2 is empty
+        v1_status = 'removed' if status == 'added' else status
+        v2_status = 'added'   if status == 'removed' else status
+
+        v1_blocks.append(_doc_block(dieu, khoan, title, v1_text or '', v1_status, 'v1'))
+        v2_blocks.append(_doc_block(dieu, khoan, title, v2_text or '', v2_status, 'v2'))
+
+    scroll_style = (
+        'height:72vh;overflow-y:auto;border:1px solid #e2e8f0;'
+        'border-radius:10px;padding:0.8rem;background:#fafafa;'
+    )
+
+    with col_v1:
+        st.markdown("**📄 V1 — Phiên bản cũ**")
+        st.markdown(
+            f'<div style="{scroll_style}">{"".join(v1_blocks)}</div>',
+            unsafe_allow_html=True,
+        )
+
+    with col_v2:
+        st.markdown("**📄 V2 — Phiên bản mới**")
+        st.markdown(
+            f'<div style="{scroll_style}">{"".join(v2_blocks)}</div>',
+            unsafe_allow_html=True,
+        )

@@ -11,13 +11,21 @@ try:
 except ImportError:
     ollama = None
 
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
+
 from src.ingest import normalize_ws
 from src.retriever import (
     article_sort_key,
     build_articles_from_chunks,
     query_candidates_for_article,
 )
-from configs.defaults import COSINE_LOW
+from configs.defaults import COSINE_LOW, COSINE_HIGH
+
+COSINE_WEIGHT = 0.70
+BM25_WEIGHT   = 0.30
 
 
 # ── Text helpers ─────────────────────────────────────────────────────
@@ -151,39 +159,6 @@ def _normalize_evidence_items(evidence: list[dict], max_items: int = 3) -> list[
     return normalized
 
 
-def _normalize_diff_annotations(
-    annotations: list[dict], diff_blocks: list[dict], max_items: int = 8,
-) -> list[dict]:
-    blocks_by_id = {block['block_id']: block for block in diff_blocks}
-    normalized = []
-    for item in annotations or []:
-        if not isinstance(item, dict):
-            continue
-        block_id = str(item.get('block_id') or '').strip()
-        block = blocks_by_id.get(block_id)
-        if not block:
-            continue
-        summary = shorten(str(item.get('summary') or ''), 300)
-        legal_effect = shorten(str(item.get('legal_effect') or ''), 400)
-        severity = str(item.get('severity') or 'unknown').strip().lower()
-        if severity not in {'low', 'medium', 'high', 'unknown'}:
-            severity = 'unknown'
-        if not summary and not legal_effect:
-            continue
-        normalized.append({
-            'block_id': block_id,
-            'tag': block.get('tag', 'changed'),
-            'v1_lines': block.get('v1_lines', []),
-            'v2_lines': block.get('v2_lines', []),
-            'summary': summary,
-            'legal_effect': legal_effect,
-            'severity': severity,
-        })
-        if len(normalized) >= max_items:
-            break
-    return normalized
-
-
 def enforce_no_evidence_no_conclusion(
     status: str, conclusion: str, evidence: list[dict],
     before_norm: str, after_norm: str,
@@ -220,12 +195,21 @@ def enforce_no_evidence_no_conclusion(
 
 # ── LLM comparison ───────────────────────────────────────────────────
 
+def _parse_composite_no(article_no: str) -> tuple[str, str]:
+    """Split composite '1.2' → ('1', '2'); '1' → ('1', '0')."""
+    if '.' in article_no:
+        parts = article_no.split('.', 1)
+        return parts[0], parts[1]
+    return article_no, '0'
+
+
 def llm_compare_article(
     article_no: str,
     title: str,
     before_text: str | None,
     after_text: str | None,
     model: str = "qwen2.5:7b-instruct-q4_K_M",
+    match_type: str = "matched",
 ) -> dict:
     before_norm = normalize_ws(before_text or '')
     after_norm = normalize_ws(after_text or '')
@@ -237,73 +221,41 @@ def llm_compare_article(
             'conclusion': 'Khong ghi nhan khac biet ve mat van ban.',
             'evidence': [],
             'diff_blocks': [],
-            'diff_annotations': [],
             'llm_model': None,
             'llm_used': False,
             'fallback_reason': 'texts_equal',
             'grounded': True,
         }
 
-    prompt_diff_blocks = [
-        {
-            'block_id': block['block_id'],
-            'tag': block['tag'],
-            'v1_lines': block['v1_lines'],
-            'v2_lines': block['v2_lines'],
-            'before': shorten(block.get('before', ''), 600),
-            'after': shorten(block.get('after', ''), 600),
-        }
-        for block in diff_blocks[:8]
-    ]
-    diff_blocks_json = json.dumps(prompt_diff_blocks, ensure_ascii=False, indent=2)
+    dieu_no, khoan_no = _parse_composite_no(article_no)
+    weak_hint = (
+        '\nCHU Y: Cap nay co do tuong dong thap; co the khong cung khoan.'
+        if match_type == 'weak_match' else ''
+    )
+    meta = (
+        f"Dieu {dieu_no} - {title} | Khoan {khoan_no}"
+        if khoan_no != '0'
+        else f"Dieu {dieu_no} - {title}"
+    )
 
-    prompt = f"""
-Ban la tro ly doi chieu hop dong. So sanh 2 PHIEN BAN cua CUNG MOT DIEU.
-
-Muc tieu:
-- Xac dinh trang thai thay doi.
-- Dua ra ket luan ngan gon.
-- Trich dan bang chung tu chinh van ban da cho.
-- Giai thich y nghia cua tung block thay doi da duoc code xac dinh san.
+    prompt = f"""Ban la tro ly doi chieu van ban phap ly. So sanh 2 phien ban cung mot Khoan.{weak_hint}
 
 QUY TAC BAT BUOC:
-1) Chi su dung noi dung trong 'Dieu v1' va 'Dieu v2'. Khong bo sung kien thuc ngoai.
-2) Trang thai CHI duoc la mot trong: unchanged, changed, added, removed.
-3) Neu khong tim thay bang chung text ro rang, evidence phai de rong va conclusion ghi ro "Khong du bang chung de ket luan".
-4) diff_annotations CHI duoc tham chieu block_id co trong DIFF_BLOCKS. Khong tu tao block_id moi.
-5) severity CHI duoc la low, medium, high, unknown.
-6) Tra ve DUY NHAT JSON dung schema, KHONG them markdown hay giai thich.
+1. Chi dung noi dung trong "Khoan v1" va "Khoan v2". Khong bo sung kien thuc ngoai.
+2. Trang thai CHI duoc la: unchanged | changed | added | removed.
+3. Neu khong co bang chung text ro rang, evidence phai de rong va conclusion ghi ro "Khong du bang chung de ket luan".
+4. Tra ve DUY NHAT JSON hop le, KHONG them markdown hay giai thich.
 
-SCHEMA JSON:
-{{
-  "status": "unchanged|changed|added|removed",
-  "conclusion": "string",
-  "evidence": [
-    {{"tag": "changed|added|removed", "before": "string", "after": "string"}}
-  ],
-  "diff_annotations": [
-    {{
-      "block_id": "B1",
-      "summary": "string tom tat block thay doi",
-      "legal_effect": "string neu tac dong phap ly/nghia vu/quyen loi; neu khong ro thi ghi unknown",
-      "severity": "low|medium|high|unknown"
-    }}
-  ]
-}}
+SCHEMA:
+{{"status":"unchanged|changed|added|removed","conclusion":"string","evidence":[{{"tag":"changed|added|removed","before":"string","after":"string"}}]}}
 
-META:
-- article_number: {article_no}
-- article_title: {title}
+META: {meta}
 
-Dieu v1:
+Khoan v1:
 {before_norm or '(khong co)'}
 
-Dieu v2:
-{after_norm or '(khong co)'}
-
-DIFF_BLOCKS do he thong xac dinh san:
-{diff_blocks_json}
-""".strip()
+Khoan v2:
+{after_norm or '(khong co)'}""".strip()
 
     if ollama is None:
         status, conclusion, evidence, grounded = enforce_no_evidence_no_conclusion(
@@ -314,7 +266,7 @@ DIFF_BLOCKS do he thong xac dinh san:
         )
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
-            'diff_blocks': diff_blocks, 'diff_annotations': [],
+            'diff_blocks': diff_blocks,
             'llm_model': None, 'llm_used': False,
             'fallback_reason': 'missing_ollama_package', 'grounded': grounded,
         }
@@ -333,18 +285,13 @@ DIFF_BLOCKS do he thong xac dinh san:
         status = parsed.get('status')
         conclusion = parsed.get('conclusion') or ''
         evidence = parsed.get('evidence') if isinstance(parsed.get('evidence'), list) else []
-        annotations = (
-            parsed.get('diff_annotations')
-            if isinstance(parsed.get('diff_annotations'), list) else []
-        )
 
         status, conclusion, evidence, grounded = enforce_no_evidence_no_conclusion(
             status, conclusion, evidence, before_norm, after_norm,
         )
-        diff_annotations = _normalize_diff_annotations(annotations, diff_blocks)
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
-            'diff_blocks': diff_blocks, 'diff_annotations': diff_annotations,
+            'diff_blocks': diff_blocks,
             'llm_model': model, 'llm_used': True,
             'fallback_reason': None, 'grounded': grounded,
         }
@@ -357,13 +304,32 @@ DIFF_BLOCKS do he thong xac dinh san:
         )
         return {
             'status': status, 'conclusion': conclusion, 'evidence': evidence,
-            'diff_blocks': diff_blocks, 'diff_annotations': [],
+            'diff_blocks': diff_blocks,
             'llm_model': model, 'llm_used': False,
             'fallback_reason': str(exc), 'grounded': grounded,
         }
 
 
 # ── Full comparison with vector retrieval ────────────────────────────
+
+def _tokenize_vi(text: str) -> list[str]:
+    """Simple whitespace tokenizer for BM25 (Vietnamese-safe)."""
+    return normalize_ws(text).lower().split()
+
+
+def _build_bm25_index(articles: dict[str, dict]):
+    """Build BM25 index over article texts. Returns (corpus_keys, bm25 | None)."""
+    keys = list(articles.keys())
+    if not keys or BM25Okapi is None:
+        return keys, None
+    tokenized = [_tokenize_vi(articles[k]['full_text']) for k in keys]
+    bm25 = BM25Okapi(tokenized)
+    return keys, bm25
+
+
+def _hybrid_score(cosine: float, bm25_norm: float) -> float:
+    return COSINE_WEIGHT * cosine + BM25_WEIGHT * bm25_norm
+
 
 def compare_articles_with_vector_retrieval(
     chunks_v1: list[dict],
@@ -375,9 +341,12 @@ def compare_articles_with_vector_retrieval(
     top_k: int = 3,
     threshold: float = COSINE_LOW,
 ) -> list[dict]:
-    """Compare two sets of chunks using vector retrieval + LLM."""
+    """Compare two sets of chunks using hybrid BM25+Cosine retrieval + LLM."""
     left_articles = build_articles_from_chunks(chunks_v1)
     right_articles = build_articles_from_chunks(chunks_v2)
+
+    # Pre-build BM25 index over V2 articles for hybrid scoring
+    right_keys, bm25_index = _build_bm25_index(right_articles)
 
     left_numbers = sorted(left_articles.keys(), key=article_sort_key)
     matched_right = set()
@@ -398,24 +367,57 @@ def compare_articles_with_vector_retrieval(
                 'distance': 0.0,
             }
 
-        # ── Priority 2: vector search for articles without same-number match ──
+        # ── Priority 2: hybrid BM25+Cosine search ────────────────────
         if chosen is None:
+            # Cosine candidates from ChromaDB
             candidates = query_candidates_for_article(
                 left['full_text'], target_version='v2',
                 chroma_dir=chroma_dir, embedder=embedder,
                 collection_name=collection_name, top_k=top_k,
             )
-            for cand in candidates:
-                cand_article_no = cand.get('article_number')
-                if not cand_article_no or cand_article_no in matched_right:
+            cosine_by_no = {
+                c['article_number']: c['similarity']
+                for c in candidates
+                if c.get('article_number')
+            }
+
+            # BM25 scores over all V2 articles
+            bm25_scores_raw = {}
+            if bm25_index is not None and right_keys:
+                query_tokens = _tokenize_vi(left['full_text'])
+                raw_scores = bm25_index.get_scores(query_tokens)
+                max_score = max(raw_scores) if max(raw_scores) > 0 else 1.0
+                bm25_scores_raw = {
+                    right_keys[i]: raw_scores[i] / max_score
+                    for i in range(len(right_keys))
+                }
+
+            # Compute hybrid scores for candidate pool
+            candidate_nos = set(cosine_by_no.keys()) | set(bm25_scores_raw.keys())
+            scored = []
+            for cand_no in candidate_nos:
+                if cand_no in matched_right:
                     continue
-                # Skip exact-number matches already in right_articles to avoid
-                # cross-version number collisions
-                if cand_article_no in right_articles and cand_article_no != article_no:
+                cosine = cosine_by_no.get(cand_no, 0.0)
+                bm25_n = bm25_scores_raw.get(cand_no, 0.0)
+                hybrid = _hybrid_score(cosine, bm25_n)
+                if hybrid >= threshold:
+                    scored.append((hybrid, cand_no))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            for hybrid_score, cand_no in scored:
+                if cand_no not in right_articles:
                     continue
-                if cand['similarity'] >= threshold:
-                    chosen = cand
-                    break
+                right_cand = right_articles[cand_no]
+                chosen = {
+                    'article_number': cand_no,
+                    'article_title': right_cand['article_title'],
+                    'text': right_cand['full_text'],
+                    'similarity': hybrid_score,
+                    'distance': 0.0,
+                }
+                break
 
         if chosen is None:
             llm_result = llm_compare_article(
@@ -424,9 +426,12 @@ def compare_articles_with_vector_retrieval(
                 before_text=left['full_text'],
                 after_text=None,
                 model=llm_model,
+                match_type='no_match',
             )
             results.append({
                 'article_number': article_no,
+                'dieu_number': left.get('dieu_number', article_no),
+                'khoan_number': left.get('khoan_number', '0'),
                 'article_title': left['article_title'],
                 'matched_article_v2': None,
                 'match_score': 0.0,
@@ -444,13 +449,41 @@ def compare_articles_with_vector_retrieval(
             'article_title', chosen.get('article_title') or left['article_title'],
         )
 
+        # ── COSINE_HIGH shortcut: skip LLM if texts are near-identical ──
+        similarity = float(chosen.get('similarity', 0.0))
+        before_norm = normalize_ws(left['full_text'])
+        after_norm = normalize_ws(right_text)
+        if similarity >= COSINE_HIGH and before_norm == after_norm:
+            results.append({
+                'article_number': article_no,
+                'dieu_number': left.get('dieu_number', article_no),
+                'khoan_number': left.get('khoan_number', '0'),
+                'article_title': title,
+                'matched_article_v2': matched_article_no,
+                'match_score': round(similarity, 4),
+                'status': 'unchanged',
+                'conclusion': 'Khong ghi nhan khac biet ve mat van ban.',
+                'evidence': [],
+                'diff_blocks': [],
+                'llm_model': None,
+                'llm_used': False,
+                'fallback_reason': 'cosine_high_unchanged',
+                'grounded': True,
+                'v1_text': left['full_text'],
+                'v2_text': right_text,
+            })
+            continue
+
+        match_type = 'weak_match' if similarity < COSINE_HIGH else 'matched'
         llm_result = llm_compare_article(
             article_no=article_no, title=title,
             before_text=left['full_text'], after_text=right_text,
-            model=llm_model,
+            model=llm_model, match_type=match_type,
         )
         results.append({
             'article_number': article_no,
+            'dieu_number': left.get('dieu_number', article_no),
+            'khoan_number': left.get('khoan_number', '0'),
             'article_title': title,
             'matched_article_v2': matched_article_no,
             'match_score': round(float(chosen['similarity']), 4),
@@ -470,9 +503,12 @@ def compare_articles_with_vector_retrieval(
             before_text=None,
             after_text=right['full_text'],
             model=llm_model,
+            match_type='added',
         )
         results.append({
             'article_number': article_no,
+            'dieu_number': right.get('dieu_number', article_no),
+            'khoan_number': right.get('khoan_number', '0'),
             'article_title': right['article_title'],
             'matched_article_v2': article_no,
             'match_score': 0.0,

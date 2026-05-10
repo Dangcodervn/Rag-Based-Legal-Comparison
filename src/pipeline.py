@@ -7,7 +7,7 @@ from typing import Callable
 from loguru import logger
 
 from src.ingest import read_and_normalize
-from src.chunker import chunk_document
+from src.chunker import chunk_document, explode_to_khoan_chunks
 from src.indexer import load_embedder, index_chunks, embed_chunks
 from src.comparator import compare_articles_with_vector_retrieval
 from src.reporter import build_report, build_summary_df, build_citation_df, save_report_json
@@ -71,7 +71,11 @@ def run_comparison_pipeline(
     _progress("Chia chunk v2 theo Dieu...", 0.25)
     chunks_v2 = chunk_document(doc_v2, doc_id=file_v2.stem, version='v2')
 
-    logger.info(f"Chunks: v1={len(chunks_v1)}, v2={len(chunks_v2)}")
+    _progress("Tach chunk theo Khoan...", 0.28)
+    chunks_v1 = explode_to_khoan_chunks(chunks_v1)
+    chunks_v2 = explode_to_khoan_chunks(chunks_v2)
+
+    logger.info(f"Khoan chunks: v1={len(chunks_v1)}, v2={len(chunks_v2)}")
 
     # ── Step 3: Embed & index ────────────────────────────────────────
     _progress("Tai embedding model...", 0.30)

@@ -419,3 +419,46 @@ def chunk_document(document, doc_id: str, version: str) -> list[dict]:
             return _chunk_docx_headings(document, doc_id, version)
         return _chunk_plain_text(document.get("text", ""), doc_id, version)
     return _chunk_plain_text(document, doc_id, version)
+
+
+def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
+    """Expand article-level chunks into one chunk per Khoản.
+
+    Each output chunk has:
+    - article_number = "{dieu}.{khoan}" composite key (e.g. "1.2")
+    - dieu_number    = original Điều number (e.g. "1")
+    - khoan_number   = Khoản number (e.g. "2")
+    - text           = the Khoản's body text
+
+    Chunks without khoan_items are passed through with khoan_number="0".
+    """
+    result = []
+    for chunk in chunks:
+        dieu_no = str(chunk.get('article_number', ''))
+        khoan_items = chunk.get('khoan_items') or []
+
+        if not khoan_items:
+            out = dict(chunk)
+            out['dieu_number'] = dieu_no
+            out['khoan_number'] = '0'
+            result.append(out)
+            continue
+
+        for khoan in khoan_items:
+            khoan_no = str(khoan.get('khoan_number', '')).strip()
+            if not khoan_no:
+                continue
+            khoan_text = khoan.get('text', '').strip()
+            if not khoan_text:
+                continue
+            out = dict(chunk)
+            out['chunk_id'] = f"{chunk['chunk_id']}_k{khoan_no}"
+            out['article_number'] = f"{dieu_no}.{khoan_no}"
+            out['dieu_number'] = dieu_no
+            out['khoan_number'] = khoan_no
+            out['text'] = khoan_text
+            out['char_len'] = len(khoan_text)
+            out['khoan_items'] = []
+            result.append(out)
+
+    return result

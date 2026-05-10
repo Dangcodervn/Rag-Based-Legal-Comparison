@@ -52,6 +52,8 @@ def index_chunks(
                     "muc_so": c["muc_so"],
                     "article_number": c["article_number"],
                     "article_title": c["article_title"],
+                    "dieu_number": str(c.get("dieu_number") or c["article_number"]),
+                    "khoan_number": str(c.get("khoan_number") or "0"),
                     "khoan_count": c["khoan_count"],
                     "diem_count": c["diem_count"],
                     "tieu_muc_count": c.get("tieu_muc_count", 0),
