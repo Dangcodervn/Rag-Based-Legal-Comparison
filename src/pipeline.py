@@ -32,6 +32,7 @@ def run_comparison_pipeline(
     threshold: float = COSINE_LOW,
     hf_token: str | None = None,
     on_progress: Callable[[str, float], None] | None = None,
+    embedder=None,
 ) -> dict:
     """
     Full pipeline: 2 files → comparison report.
@@ -48,6 +49,8 @@ def run_comparison_pipeline(
         threshold: Minimum similarity score for matching.
         hf_token: HuggingFace token (optional).
         on_progress: Callback(step_name, progress_fraction) for UI.
+        embedder: Pre-loaded SentenceTransformer instance. When provided,
+                  the pipeline skips the model-loading step entirely.
 
     Returns:
         Dict with keys: report, summary_df, citation_df, report_path.
@@ -78,9 +81,12 @@ def run_comparison_pipeline(
     logger.info(f"Khoan chunks: v1={len(chunks_v1)}, v2={len(chunks_v2)}")
 
     # ── Step 3: Embed & index ────────────────────────────────────────
-    _progress("Tai embedding model...", 0.30)
-    hf_token = hf_token or os.getenv('HF_TOKEN')
-    embedder = load_embedder(embed_model, hf_token=hf_token)
+    if embedder is None:
+        _progress("Tai embedding model...", 0.30)
+        hf_token = hf_token or os.getenv('HF_TOKEN')
+        embedder = load_embedder(embed_model, hf_token=hf_token)
+    else:
+        _progress("Embedding model san sang...", 0.30)
 
     _progress("Index v1 vao ChromaDB...", 0.40)
     n1 = index_chunks(chunks_v1, chroma_dir, embedder, collection_name)

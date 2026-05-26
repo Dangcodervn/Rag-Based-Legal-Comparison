@@ -468,3 +468,154 @@ def render_document_view(comparison_results: list[dict]):
             f'<div style="{scroll_style}">{"".join(v2_blocks)}</div>',
             unsafe_allow_html=True,
         )
+
+
+# ── 5. Parallel document view — helpers ──────────────────────────────
+
+import io as _io
+import base64 as _b64mod
+import tempfile as _tmpmod
+
+
+def _try_docx2pdf_b64(file_bytes: bytes) -> str | None:
+    """Convert DOCX → PDF via Microsoft Word COM (Windows only).
+    Returns base64-encoded PDF bytes, or None if conversion fails.
+    """
+    try:
+        from pathlib import Path as _P
+        from docx2pdf import convert as _conv
+        tmp = _P(_tmpmod.mkdtemp(prefix="legal_pdf_"))
+        src = tmp / "input.docx"
+        dst = tmp / "output.pdf"
+        src.write_bytes(file_bytes)
+        _conv(str(src), str(dst))
+        if dst.exists() and dst.stat().st_size > 0:
+            return _b64mod.b64encode(dst.read_bytes()).decode("ascii")
+    except Exception:
+        pass
+    return None
+
+
+def _try_mammoth_html(file_bytes: bytes) -> str | None:
+    """Convert DOCX → HTML using mammoth (pure Python, no Word required).
+    Returns HTML fragment string, or None if conversion fails.
+    """
+    try:
+        import mammoth as _mammoth
+        with _io.BytesIO(file_bytes) as f:
+            result = _mammoth.convert_to_html(f)
+        return result.value or None
+    except Exception:
+        pass
+    return None
+
+
+def prepare_doc_view(file_bytes: bytes, ext: str) -> dict:
+    """Pre-compute document view data for render_parallel_doc_view.
+
+    Priority:
+      DOCX → docx2pdf (Word COM, pixel-perfect) → mammoth HTML (fallback)
+      PDF  → base64 embed directly
+
+    Returns:
+        {'type': 'pdf',  'data': '<base64 string>'}
+        {'type': 'html', 'data': '<html fragment>'}
+        {'type': 'error','data': ''}
+    """
+    ext = ext.lower()
+    if ext == ".pdf":
+        return {"type": "pdf", "data": _b64mod.b64encode(file_bytes).decode("ascii")}
+    if ext == ".docx":
+        b64 = _try_docx2pdf_b64(file_bytes)
+        if b64:
+            return {"type": "pdf", "data": b64}
+        doc_html = _try_mammoth_html(file_bytes)
+        if doc_html:
+            return {"type": "html", "data": doc_html}
+    return {"type": "error", "data": ""}
+
+
+# ── 5. Parallel document view — renderer ─────────────────────────────
+
+def render_parallel_doc_view(
+    dv1: dict,
+    dv2: dict,
+    name_v1: str = "V1",
+    name_v2: str = "V2",
+):
+    """Render two pre-computed document views side by side inside an iframe.
+
+    dv1 / dv2 are dicts produced by prepare_doc_view():
+      {'type': 'pdf',  'data': '<base64>'}   → embedded via <object> tag
+      {'type': 'html', 'data': '<fragment>'} → mammoth HTML in styled panel
+      {'type': 'error','data': ''}           → error message
+    """
+    import streamlit.components.v1 as _components
+
+    def _panel_body(dv: dict) -> str:
+        t = dv.get("type", "error")
+        d = dv.get("data", "")
+        if t == "pdf":
+            return (
+                f'<object data="data:application/pdf;base64,{d}" '
+                f'type="application/pdf" width="100%" height="100%" '
+                f'style="border:none;display:block">'
+                f'<p style="padding:14px;color:#64748b">'
+                f'Trình duyệt không hỗ trợ xem PDF nội tuyến.</p>'
+                f'</object>'
+            )
+        if t == "html":
+            return f'<div class="doc-body">{d}</div>'
+        return '<div style="padding:14px;color:#ef4444">Không thể render tài liệu.</div>'
+
+    p1 = _panel_body(dv1)
+    p2 = _panel_body(dv2)
+    esc_n1 = html.escape(name_v1)
+    esc_n2 = html.escape(name_v2)
+
+    panel_html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#e8ecf0;padding:6px;font-family:'Segoe UI',Arial,sans-serif}}
+.wrap{{display:flex;gap:10px;height:calc(100vh - 16px)}}
+.panel{{
+  flex:1;display:flex;flex-direction:column;
+  border:1px solid #d1d5db;border-radius:8px;
+  overflow:hidden;background:#fff;
+  box-shadow:0 1px 4px rgba(0,0,0,.07);
+}}
+.ph{{
+  background:#f1f5f9;border-bottom:1px solid #e2e8f0;
+  padding:7px 16px;font-weight:700;font-size:.82rem;
+  color:#1e293b;flex-shrink:0;
+}}
+.pb{{flex:1;overflow:hidden;position:relative}}
+.doc-body{{
+  height:100%;overflow-y:auto;
+  padding:24px 32px;
+  font-family:'Calibri','Times New Roman',serif;
+  font-size:12pt;line-height:1.7;color:#111;
+}}
+.doc-body h1{{font-size:14pt;font-weight:700;text-align:center;margin:.9rem 0 .4rem}}
+.doc-body h2{{font-size:13pt;font-weight:700;margin:.8rem 0 .35rem}}
+.doc-body h3{{font-size:12pt;font-weight:700;margin:.7rem 0 .3rem}}
+.doc-body p{{margin:0 0 5pt;text-align:justify}}
+.doc-body table{{border-collapse:collapse;width:100%;margin:8pt 0}}
+.doc-body td,.doc-body th{{border:1px solid #999;padding:4pt 6pt;vertical-align:top;font-size:11pt}}
+.doc-body ul,.doc-body ol{{margin:4pt 0 4pt 20pt}}
+.doc-body li{{margin-bottom:2pt}}
+object{{display:block;width:100%;height:100%}}
+</style></head><body>
+<div class="wrap">
+  <div class="panel">
+    <div class="ph">📄 {esc_n1}</div>
+    <div class="pb">{p1}</div>
+  </div>
+  <div class="panel">
+    <div class="ph">📄 {esc_n2}</div>
+    <div class="pb">{p2}</div>
+  </div>
+</div>
+</body></html>"""
+
+    _components.html(panel_html, height=710, scrolling=False)

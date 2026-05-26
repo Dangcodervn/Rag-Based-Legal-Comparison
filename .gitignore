@@ -38,3 +38,12 @@ Thumbs.db
 
 # Environment — KHÔNG commit token/secret
 .env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Temp files (legal comparison sessions)
+legal_compare_*/
+legal_pdf_*/

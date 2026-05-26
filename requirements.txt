@@ -17,8 +17,16 @@ chromadb==1.5.2              # Chroma vector database (persistent)
 # --- Pha C: Local LLM ---
 ollama==0.6.1                # Ollama Python client (gọi Qwen2.5)
 
-# --- Pha D: UI ---
-streamlit==1.54.0            # Web UI
+# --- Pha D: UI (Streamlit — kept for reference) ---
+streamlit==1.54.0            # Web UI (legacy)
+mammoth==1.9.1               # DOCX → HTML (fallback document viewer)
+docx2pdf==0.1.8              # DOCX → PDF via Microsoft Word COM (Windows)
+
+# --- Pha D: API server (FastAPI) ---
+fastapi==0.115.12            # FastAPI web framework
+uvicorn[standard]==0.34.2    # ASGI server
+python-multipart==0.0.20     # Multipart file upload support
+httpx==0.28.1                # Async HTTP client (health check)
 
 # --- Utilities ---
 tqdm==4.67.3                 # Progress bars
