@@ -35,8 +35,8 @@ export interface CompareResponse {
   session_id: string;
   config: ReportConfig;
   results: ComparisonItem[];
-  has_pdf_v1: boolean;
-  has_pdf_v2: boolean;
+  has_docx_v1: boolean;
+  has_docx_v2: boolean;
 }
 
 export interface HealthStatus {

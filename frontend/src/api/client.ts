@@ -22,6 +22,6 @@ export async function compareDocuments(
   return r.json() as Promise<CompareResponse>;
 }
 
-export function pdfUrl(sessionId: string, version: "v1" | "v2"): string {
-  return `/api/pdf/${sessionId}/${version}`;
+export function docxUrl(sessionId: string, version: "v1" | "v2"): string {
+  return `/api/docx/${sessionId}/${version}`;
 }

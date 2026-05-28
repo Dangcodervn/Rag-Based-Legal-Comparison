@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import type { CompareResponse, ChangeStatus } from "../types";
+import type { CompareResponse, ChangeStatus, ComparisonItem } from "../types";
 import UploadPanel from "./UploadPanel";
 import MetricsSummary from "./MetricsSummary";
 import ChangeCard from "./ChangeCard";
@@ -13,6 +13,18 @@ const FILTERS: { value: FilterStatus; label: string }[] = [
   { value: "removed", label: "Xóa bỏ" },
   { value: "unchanged", label: "Không đổi" },
 ];
+
+/** Sort by điều number, then khoản number — numerically */
+function sortByArticle(items: ComparisonItem[]): ComparisonItem[] {
+  return [...items].sort((a, b) => {
+    const dA = parseFloat(a.dieu_number ?? a.article_number) || 0;
+    const dB = parseFloat(b.dieu_number ?? b.article_number) || 0;
+    if (dA !== dB) return dA - dB;
+    const kA = parseFloat(a.khoan_number ?? "0") || 0;
+    const kB = parseFloat(b.khoan_number ?? "0") || 0;
+    return kA - kB;
+  });
+}
 
 interface Props {
   onCompare: (v1: File, v2: File) => void;
@@ -32,9 +44,11 @@ export default function CompareTab({
   const filtered = useMemo(
     () =>
       result
-        ? filter === "all"
-          ? result.results
-          : result.results.filter((r) => r.status === filter)
+        ? sortByArticle(
+            filter === "all"
+              ? result.results
+              : result.results.filter((r) => r.status === filter),
+          )
         : [],
     [result, filter],
   );

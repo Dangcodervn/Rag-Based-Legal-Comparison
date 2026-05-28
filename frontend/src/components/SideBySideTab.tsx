@@ -1,6 +1,6 @@
 import type { CompareResponse } from "../types";
 import DocViewer from "./DocViewer";
-import { pdfUrl } from "../api/client";
+import { docxUrl } from "../api/client";
 
 interface Props {
   result: CompareResponse | null;
@@ -16,8 +16,8 @@ export default function SideBySideTab({ result }: Props) {
     );
   }
 
-  const urlV1 = result.has_pdf_v1 ? pdfUrl(result.session_id, "v1") : null;
-  const urlV2 = result.has_pdf_v2 ? pdfUrl(result.session_id, "v2") : null;
+  const urlV1 = result.has_docx_v1 ? docxUrl(result.session_id, "v1") : null;
+  const urlV2 = result.has_docx_v2 ? docxUrl(result.session_id, "v2") : null;
 
   return (
     <div className="flex gap-3" style={{ height: "calc(100vh - 160px)" }}>

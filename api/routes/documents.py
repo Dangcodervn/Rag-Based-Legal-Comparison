@@ -1,4 +1,4 @@
-"""GET /api/pdf/{session_id}/{version} — serve converted PDF files."""
+"""Document file endpoints — serve DOCX and PDF files."""
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
@@ -7,8 +7,32 @@ from api.session_store import get_session
 router = APIRouter(tags=["documents"])
 
 
+@router.get("/docx/{session_id}/{version}")
+async def get_docx(session_id: str, version: str):
+    if version not in ("v1", "v2"):
+        raise HTTPException(status_code=400, detail="version must be 'v1' or 'v2'")
+
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    docx_path = session.get(f"docx_{version}")
+    if not docx_path or not docx_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="DOCX file unavailable — session may have expired.",
+        )
+
+    return FileResponse(
+        path=str(docx_path),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"inline; filename=\"doc_{version}.docx\""},
+    )
+
+
 @router.get("/pdf/{session_id}/{version}")
 async def get_pdf(session_id: str, version: str):
+    """Legacy PDF endpoint — kept for backward compatibility."""
     if version not in ("v1", "v2"):
         raise HTTPException(status_code=400, detail="version must be 'v1' or 'v2'")
 

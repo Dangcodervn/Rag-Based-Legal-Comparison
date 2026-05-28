@@ -37,8 +37,8 @@ class CompareResponse(BaseModel):
     session_id: str
     config: ReportConfig
     results: list[ComparisonItem]
-    has_pdf_v1: bool
-    has_pdf_v2: bool
+    has_docx_v1: bool
+    has_docx_v2: bool
 
 
 class HealthResponse(BaseModel):

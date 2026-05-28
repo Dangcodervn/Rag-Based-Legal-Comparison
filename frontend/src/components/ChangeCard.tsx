@@ -24,6 +24,11 @@ const EVIDENCE_COLORS: Record<string, string> = {
   added: "bg-green-50 text-green-800",
   removed: "bg-red-50 text-red-800",
 };
+const EVIDENCE_TAG_LABELS: Record<string, string> = {
+  changed: "Thay đổi",
+  added: "Thêm vào",
+  removed: "Xóa bỏ",
+};
 
 interface Props {
   item: ComparisonItem;
@@ -96,7 +101,9 @@ export default function ChangeCard({ item }: Props) {
               key={idx}
               className={`rounded p-2 text-xs ${EVIDENCE_COLORS[ev.tag] ?? "bg-slate-50 text-slate-700"}`}
             >
-              <span className="font-semibold uppercase mr-2">[{ev.tag}]</span>
+              <span className="font-semibold mr-2">
+                [{EVIDENCE_TAG_LABELS[ev.tag] ?? ev.tag}]
+              </span>
               {ev.before && (
                 <>
                   <span className="line-through text-red-500 mr-1">
