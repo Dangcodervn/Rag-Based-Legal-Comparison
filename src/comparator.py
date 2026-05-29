@@ -4,6 +4,7 @@ import difflib
 import json
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -17,10 +18,11 @@ except ImportError:
     BM25Okapi = None
 
 from src.ingest import normalize_ws
+from src.indexer import get_collection
 from src.retriever import (
     article_sort_key,
     build_articles_from_chunks,
-    query_candidates_for_article,
+    query_with_vector,
 )
 from configs.defaults import COSINE_LOW, COSINE_HIGH
 
@@ -341,180 +343,213 @@ def compare_articles_with_vector_retrieval(
     top_k: int = 3,
     threshold: float = COSINE_LOW,
 ) -> list[dict]:
-    """Compare two sets of chunks using hybrid BM25+Cosine retrieval + LLM."""
-    left_articles = build_articles_from_chunks(chunks_v1)
+    """Compare two sets of chunks using hybrid BM25+Cosine retrieval + LLM.
+
+    Optimisations vs the naive version:
+    - ChromaDB collection opened ONCE (not per query).
+    - All vector-search query texts batch-embedded in a single encoder call.
+    - LLM calls run in parallel with ThreadPoolExecutor(max_workers=2).
+    """
+    from pyvi import ViTokenizer
+
+    left_articles  = build_articles_from_chunks(chunks_v1)
     right_articles = build_articles_from_chunks(chunks_v2)
-
-    # Pre-build BM25 index over V2 articles for hybrid scoring
     right_keys, bm25_index = _build_bm25_index(right_articles)
+    left_numbers   = sorted(left_articles.keys(), key=article_sort_key)
+    matched_right: set[str] = set()
 
-    left_numbers = sorted(left_articles.keys(), key=article_sort_key)
-    matched_right = set()
-    results = []
+    # ── Opt 1: single ChromaDB connection ────────────────────────────
+    collection = get_collection(chroma_dir, collection_name)
+
+    # ── Opt 2: batch-embed articles that need vector search ──────────
+    needs_vector = [no for no in left_numbers if no not in right_articles]
+    pre_embeddings: dict[str, list[float]] = {}
+    if needs_vector:
+        texts = [
+            ViTokenizer.tokenize(normalize_ws(left_articles[no]['full_text']))
+            for no in needs_vector
+        ]
+        vecs = embedder.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        pre_embeddings = {no: vecs[i].tolist() for i, no in enumerate(needs_vector)}
+
+    # ── Pass 1: resolve all pairs, collect LLM tasks ─────────────────
+    result_order: list[str] = []
+    resolved:  dict[str, dict] = {}   # results that don't need LLM
+    llm_tasks: dict[str, dict] = {}   # tasks that need LLM
 
     for article_no in left_numbers:
         left = left_articles[article_no]
+        result_order.append(article_no)
 
-        # ── Priority 1: exact article_number match ───────────────────
+        # Priority 1: exact article_number match
         chosen = None
         if article_no in right_articles and article_no not in matched_right:
             right_same = right_articles[article_no]
             chosen = {
                 'article_number': article_no,
-                'article_title': right_same['article_title'],
-                'text': right_same['full_text'],
-                'similarity': 1.0,
-                'distance': 0.0,
+                'article_title':  right_same['article_title'],
+                'text':           right_same['full_text'],
+                'similarity':     1.0,
             }
 
-        # ── Priority 2: hybrid BM25+Cosine search ────────────────────
-        if chosen is None:
-            # Cosine candidates from ChromaDB
-            candidates = query_candidates_for_article(
-                left['full_text'], target_version='v2',
-                chroma_dir=chroma_dir, embedder=embedder,
-                collection_name=collection_name, top_k=top_k,
+        # Priority 2: hybrid BM25+Cosine (uses pre-computed embedding)
+        if chosen is None and article_no in pre_embeddings:
+            candidates = query_with_vector(
+                pre_embeddings[article_no], collection, 'v2', top_k,
             )
             cosine_by_no = {
                 c['article_number']: c['similarity']
-                for c in candidates
-                if c.get('article_number')
+                for c in candidates if c.get('article_number')
             }
-
-            # BM25 scores over all V2 articles
-            bm25_scores_raw = {}
+            bm25_scores_raw: dict[str, float] = {}
             if bm25_index is not None and right_keys:
                 query_tokens = _tokenize_vi(left['full_text'])
-                raw_scores = bm25_index.get_scores(query_tokens)
-                max_score = max(raw_scores) if max(raw_scores) > 0 else 1.0
+                raw_scores   = bm25_index.get_scores(query_tokens)
+                max_score    = max(raw_scores) if max(raw_scores) > 0 else 1.0
                 bm25_scores_raw = {
                     right_keys[i]: raw_scores[i] / max_score
                     for i in range(len(right_keys))
                 }
-
-            # Compute hybrid scores for candidate pool
-            candidate_nos = set(cosine_by_no.keys()) | set(bm25_scores_raw.keys())
-            scored = []
-            for cand_no in candidate_nos:
-                if cand_no in matched_right:
-                    continue
-                cosine = cosine_by_no.get(cand_no, 0.0)
-                bm25_n = bm25_scores_raw.get(cand_no, 0.0)
-                hybrid = _hybrid_score(cosine, bm25_n)
-                if hybrid >= threshold:
-                    scored.append((hybrid, cand_no))
-
+            candidate_nos = set(cosine_by_no) | set(bm25_scores_raw)
+            scored = [
+                (_hybrid_score(cosine_by_no.get(n, 0.0), bm25_scores_raw.get(n, 0.0)), n)
+                for n in candidate_nos
+                if n not in matched_right
+                and _hybrid_score(cosine_by_no.get(n, 0.0), bm25_scores_raw.get(n, 0.0)) >= threshold
+            ]
             scored.sort(key=lambda x: x[0], reverse=True)
-
             for hybrid_score, cand_no in scored:
                 if cand_no not in right_articles:
                     continue
                 right_cand = right_articles[cand_no]
                 chosen = {
                     'article_number': cand_no,
-                    'article_title': right_cand['article_title'],
-                    'text': right_cand['full_text'],
-                    'similarity': hybrid_score,
-                    'distance': 0.0,
+                    'article_title':  right_cand['article_title'],
+                    'text':           right_cand['full_text'],
+                    'similarity':     hybrid_score,
                 }
                 break
 
+        # No match → removed (v1-only)
         if chosen is None:
-            llm_result = llm_compare_article(
-                article_no=article_no,
-                title=left['article_title'],
-                before_text=left['full_text'],
-                after_text=None,
-                model=llm_model,
-                match_type='no_match',
-            )
-            results.append({
-                'article_number': article_no,
-                'dieu_number': left.get('dieu_number', article_no),
+            llm_tasks[article_no] = {
+                'article_no':   article_no,
+                'title':        left['article_title'],
+                'before':       left['full_text'],
+                'after':        None,
+                'match_type':   'no_match',
+                'matched_no':   None,
+                'similarity':   0.0,
+                'dieu_number':  left.get('dieu_number', article_no),
                 'khoan_number': left.get('khoan_number', '0'),
-                'article_title': left['article_title'],
-                'matched_article_v2': None,
-                'match_score': 0.0,
-                **llm_result,
-                'v1_text': left['full_text'],
-                'v2_text': None,
-            })
+                'v2_only':      False,
+            }
             continue
 
         matched_article_no = chosen['article_number']
         matched_right.add(matched_article_no)
-        right = right_articles.get(matched_article_no)
+        right      = right_articles.get(matched_article_no)
         right_text = right['full_text'] if right else chosen['text']
-        title = (right or {}).get(
-            'article_title', chosen.get('article_title') or left['article_title'],
-        )
-
-        # ── COSINE_HIGH shortcut: skip LLM if texts are near-identical ──
+        title      = (right or {}).get('article_title', chosen.get('article_title') or left['article_title'])
         similarity = float(chosen.get('similarity', 0.0))
         before_norm = normalize_ws(left['full_text'])
-        after_norm = normalize_ws(right_text)
-        if similarity >= COSINE_HIGH and before_norm == after_norm:
-            results.append({
-                'article_number': article_no,
-                'dieu_number': left.get('dieu_number', article_no),
-                'khoan_number': left.get('khoan_number', '0'),
-                'article_title': title,
+        after_norm  = normalize_ws(right_text)
+
+        # Shortcut: texts identical → unchanged, no LLM needed
+        if before_norm == after_norm:
+            resolved[article_no] = {
+                'article_number':     article_no,
+                'dieu_number':        left.get('dieu_number', article_no),
+                'khoan_number':       left.get('khoan_number', '0'),
+                'article_title':      title,
                 'matched_article_v2': matched_article_no,
-                'match_score': round(similarity, 4),
-                'status': 'unchanged',
-                'conclusion': 'Khong ghi nhan khac biet ve mat van ban.',
-                'evidence': [],
-                'diff_blocks': [],
-                'llm_model': None,
-                'llm_used': False,
-                'fallback_reason': 'cosine_high_unchanged',
-                'grounded': True,
-                'v1_text': left['full_text'],
-                'v2_text': right_text,
-            })
+                'match_score':        round(similarity, 4),
+                'status':             'unchanged',
+                'conclusion':         'Khong ghi nhan khac biet ve mat van ban.',
+                'evidence':           [],
+                'diff_blocks':        [],
+                'llm_model':          None,
+                'llm_used':           False,
+                'fallback_reason':    'texts_equal',
+                'grounded':           True,
+                'v1_text':            left['full_text'],
+                'v2_text':            right_text,
+            }
             continue
 
         match_type = 'weak_match' if similarity < COSINE_HIGH else 'matched'
-        llm_result = llm_compare_article(
-            article_no=article_no, title=title,
-            before_text=left['full_text'], after_text=right_text,
-            model=llm_model, match_type=match_type,
-        )
-        results.append({
-            'article_number': article_no,
-            'dieu_number': left.get('dieu_number', article_no),
+        llm_tasks[article_no] = {
+            'article_no':   article_no,
+            'title':        title,
+            'before':       left['full_text'],
+            'after':        right_text,
+            'match_type':   match_type,
+            'matched_no':   matched_article_no,
+            'similarity':   similarity,
+            'dieu_number':  left.get('dieu_number', article_no),
             'khoan_number': left.get('khoan_number', '0'),
-            'article_title': title,
-            'matched_article_v2': matched_article_no,
-            'match_score': round(float(chosen['similarity']), 4),
-            **llm_result,
-            'v1_text': left['full_text'],
-            'v2_text': right_text,
-        })
+            'v2_only':      False,
+        }
 
     # Articles only in v2 (added)
     for article_no in sorted(right_articles.keys(), key=article_sort_key):
         if article_no in matched_right:
             continue
         right = right_articles[article_no]
-        llm_result = llm_compare_article(
-            article_no=article_no,
-            title=right['article_title'],
-            before_text=None,
-            after_text=right['full_text'],
-            model=llm_model,
-            match_type='added',
-        )
-        results.append({
-            'article_number': article_no,
-            'dieu_number': right.get('dieu_number', article_no),
+        result_order.append(article_no)
+        llm_tasks[article_no] = {
+            'article_no':   article_no,
+            'title':        right['article_title'],
+            'before':       None,
+            'after':        right['full_text'],
+            'match_type':   'added',
+            'matched_no':   article_no,
+            'similarity':   0.0,
+            'dieu_number':  right.get('dieu_number', article_no),
             'khoan_number': right.get('khoan_number', '0'),
-            'article_title': right['article_title'],
-            'matched_article_v2': article_no,
-            'match_score': 0.0,
-            **llm_result,
-            'v1_text': None,
-            'v2_text': right['full_text'],
+            'v2_only':      True,
+        }
+
+    # ── Opt 3: run LLM calls in parallel ─────────────────────────────
+    llm_results: dict[str, dict] = {}
+
+    def _run_llm(key: str) -> tuple[str, dict]:
+        t = llm_tasks[key]
+        return key, llm_compare_article(
+            article_no=t['article_no'],
+            title=t['title'],
+            before_text=t['before'],
+            after_text=t['after'],
+            model=llm_model,
+            match_type=t['match_type'],
+        )
+
+    # max_workers=2: Ollama processes one GPU request at a time, but 2 threads
+    # keeps the queue full and overlaps Python / HTTP overhead.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(_run_llm, k): k for k in llm_tasks}
+        for future in as_completed(futures):
+            k, llm_r = future.result()
+            llm_results[k] = llm_r
+
+    # ── Pass 3: assemble results in original order ────────────────────
+    results: list[dict] = []
+    for article_no in result_order:
+        if article_no in resolved:
+            results.append(resolved[article_no])
+            continue
+        t     = llm_tasks[article_no]
+        llm_r = llm_results[article_no]
+        results.append({
+            'article_number':     article_no,
+            'dieu_number':        t['dieu_number'],
+            'khoan_number':       t['khoan_number'],
+            'article_title':      t['title'],
+            'matched_article_v2': t['matched_no'],
+            'match_score':        round(float(t['similarity']), 4),
+            **llm_r,
+            'v1_text': t['before'],
+            'v2_text': t['after'],
         })
 
     return results

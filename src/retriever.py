@@ -87,3 +87,41 @@ def query_candidates_for_article(
             'metadata': md,
         })
     return candidates
+
+
+def query_with_vector(
+    query_vector: list[float],
+    collection,
+    target_version: str,
+    top_k: int = 3,
+) -> list[dict]:
+    """Query ChromaDB with a pre-computed embedding vector.
+
+    Faster than query_candidates_for_article because it skips the per-call
+    embedding and ChromaDB client creation — callers should open the collection
+    once and pass it here.
+    """
+    result = collection.query(
+        query_embeddings=[query_vector],
+        n_results=top_k,
+        where={'version': target_version},
+        include=['documents', 'metadatas', 'distances'],
+    )
+    candidates = []
+    ids = (result.get('ids') or [[]])[0]
+    documents = (result.get('documents') or [[]])[0]
+    metadatas = (result.get('metadatas') or [[]])[0]
+    distances = (result.get('distances') or [[]])[0]
+    for idx, cand_id in enumerate(ids):
+        md = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+        distance = distances[idx] if idx < len(distances) else None
+        candidates.append({
+            'chunk_id': cand_id,
+            'article_number': str(md.get('article_number') or ''),
+            'article_title': str(md.get('article_title') or ''),
+            'text': documents[idx] if idx < len(documents) else '',
+            'distance': distance,
+            'similarity': _distance_to_similarity(distance),
+            'metadata': md,
+        })
+    return candidates
