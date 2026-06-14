@@ -18,6 +18,23 @@ def get_collection(chroma_dir: Path | str, collection_name: str = "legal_chunks"
     return client.get_or_create_collection(collection_name)
 
 
+def reset_collection(chroma_dir: Path | str, collection_name: str = "legal_chunks"):
+    """Drop and recreate a collection to clear stale chunks from prior runs.
+
+    Each comparison run only needs its own v1/v2 chunks. Because the persistent
+    collection name is fixed, leftover chunks from a previous comparison (e.g.
+    when the earlier document had more chunks) can pollute vector queries.
+    Resetting guarantees a clean index per run.
+    """
+    client = chromadb.PersistentClient(path=str(chroma_dir))
+    try:
+        client.delete_collection(collection_name)
+    except Exception:
+        # Collection may not exist yet on first run — safe to ignore.
+        pass
+    return client.get_or_create_collection(collection_name)
+
+
 def embed_chunks(chunks: list[dict], embedder) -> list[list[float]]:
     """Embed chunk texts using ViTokenizer segmentation + embedder."""
     texts = [c["text"] for c in chunks]

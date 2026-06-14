@@ -6,7 +6,7 @@
 src/              # Trong (chi co __init__.py)
 configs/          # defaults.py co san LLM/embed config
 notebooks/        # Toan bo logic nam trong Comparison_report_demo.ipynb
-requirements.txt  # Da co streamlit, ollama, chromadb, sentence-transformers...
+requirements.txt  # Ollama, ChromaDB, sentence-transformers, FastAPI...
 ```
 
 Toan bo code dang nam trong 6 cell notebook. Can tach thanh module Python
@@ -162,22 +162,25 @@ src/
 
 ### Stack chon
 
-- **UI:** Streamlit (da co trong requirements.txt)
-- **Ly do:** Khong can tach backend API rieng vi Streamlit goi truc tiep
-  Python function. Don gian, phu hop prototype/demo. Neu can API rieng
-  sau nay thi them FastAPI layer boc `pipeline.py`.
+- **Backend API:** FastAPI
+- **Frontend UI:** React + TypeScript (Vite)
+- **Ly do:** Tach ro backend pipeline va frontend rendering, de scale,
+  test, va trien khai doc lap.
 
 ### Cau truc file
 
 ```
-app/
-├── streamlit_app.py     # Entry point: streamlit run app/streamlit_app.py
-├── pages/
-│   ├── 1_Upload.py      # Trang upload 2 file
-│   ├── 2_Report.py      # Trang xem bao cao
-│   └── 3_History.py     # (Optional) Xem lai bao cao cu
-└── components/
-    └── report_view.py   # Render bang, chart, citation
+api/
+├── main.py              # FastAPI app entry
+├── routes/              # API routes (upload/compare/report)
+└── schemas/             # Request/response schemas
+
+frontend/
+├── src/
+│   ├── pages/           # Upload, report, compare views
+│   ├── components/      # Reusable UI blocks
+│   └── services/        # API client layer
+└── package.json
 ```
 
 ### Man hinh & luong su dung
@@ -186,15 +189,15 @@ app/
 [Trang Upload]
   ├── Upload file v1 (DOCX/PDF)
   ├── Upload file v2 (DOCX/PDF)
-  ├── Cau hinh (LLM model, top_k, threshold) — co gia tri mac dinh
+  ├── Goi API compare
   ├── Nut [Chay So Sanh]
-  │     └── Progress bar (callback tu pipeline)
+  │     └── Progress bar (polling/tracking status tu API)
   └── Khi xong → chuyen sang Trang Report
 
 [Trang Report]
   ├── Tong quan: so dieu, unchanged/changed/added/removed, grounded %
-  ├── Bang tom tat (summary_df) — loc theo trang thai
-  ├── Bang trich dan (citation_df) — hien thi evidence
+  ├── Bang tom tat — loc theo trang thai
+  ├── Bang trich dan — hien thi evidence
   ├── Xem chi tiet tung dieu (expand)
   │     ├── Text v1 vs v2 (side-by-side hoac diff highlight)
   │     ├── Ket luan LLM
@@ -216,15 +219,15 @@ app/
 
 ### Buoc thuc hien (Phan 2)
 
-| Buoc | Viec                                                 | Uoc luong |
-| ---- | ---------------------------------------------------- | --------- |
-| 2.1  | Tao `app/streamlit_app.py` — layout chinh + sidebar  | nhanh     |
-| 2.2  | Tao trang Upload — form upload + config + nut chay   | vua       |
-| 2.3  | Ket noi voi `pipeline.run_comparison_pipeline()`     | vua       |
-| 2.4  | Tao trang Report — render bang + citation + chi tiet | vua       |
-| 2.5  | Them download JSON/Markdown                          | nhanh     |
-| 2.6  | Xu ly loi: file sai dinh dang, LLM khong co          | nhanh     |
-| 2.7  | Test end-to-end voi sample v1/v2                     | vua       |
+| Buoc | Viec                                               | Uoc luong |
+| ---- | -------------------------------------------------- | --------- |
+| 2.1  | Tao API endpoint compare + health check            | nhanh     |
+| 2.2  | Tao frontend Upload page + validation              | vua       |
+| 2.3  | Ket noi frontend voi endpoint compare              | vua       |
+| 2.4  | Tao trang Report (summary, evidence, side-by-side) | vua       |
+| 2.5  | Them download JSON report                          | nhanh     |
+| 2.6  | Xu ly loi API/network/LLM                          | nhanh     |
+| 2.7  | Test end-to-end voi sample v1/v2                   | vua       |
 
 ---
 

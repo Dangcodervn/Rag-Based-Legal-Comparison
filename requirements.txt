@@ -17,10 +17,7 @@ chromadb==1.5.2              # Chroma vector database (persistent)
 # --- Pha C: Local LLM ---
 ollama==0.6.1                # Ollama Python client (gọi Qwen2.5)
 
-# --- Pha D: UI (Streamlit — kept for reference) ---
-streamlit==1.54.0            # Web UI (legacy)
-mammoth==1.9.1               # DOCX → HTML (fallback document viewer)
-docx2pdf==0.1.8              # DOCX → PDF via Microsoft Word COM (Windows)
+# --- Pha D: Web stack helpers ---
 
 # --- Pha D: API server (FastAPI) ---
 fastapi==0.115.12            # FastAPI web framework

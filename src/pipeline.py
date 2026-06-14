@@ -8,9 +8,18 @@ from loguru import logger
 
 from src.ingest import read_and_normalize
 from src.chunker import chunk_document, explode_to_khoan_chunks
-from src.indexer import load_embedder, index_chunks, embed_chunks
+from src.indexer import load_embedder, index_chunks, embed_chunks, reset_collection
 from src.comparator import compare_articles_with_vector_retrieval
-from src.reporter import build_report, build_summary_df, build_citation_df, save_report_json
+from src.reporter import (
+    build_report,
+    build_summary_df,
+    build_citation_df,
+    save_report_json,
+    build_copilot_report,
+    render_copilot_text,
+    save_copilot_report_json,
+    save_copilot_report_txt,
+)
 
 from configs.defaults import (
     EMBEDDING_MODEL,
@@ -18,6 +27,24 @@ from configs.defaults import (
     OLLAMA_MODEL,
     COSINE_LOW,
 )
+
+
+def _is_preamble_item(item: dict) -> bool:
+    """Return True when a comparison row belongs to synthetic preamble Điều 0."""
+    dieu = str(item.get('dieu_number') or item.get('article_number') or '').strip().upper()
+    return dieu == '0'
+
+
+def _is_synthetic_section_item(item: dict) -> bool:
+    """Return True for auto-generated unnumbered sections (S1, S2, ...)."""
+    dieu = str(item.get('dieu_number') or item.get('article_number') or '').strip().upper()
+    return dieu.startswith('S') and dieu[1:].isdigit()
+
+
+def _is_non_khoan_item(item: dict) -> bool:
+    """Return True for rows that are not clause-level (Khoan 0 / missing)."""
+    khoan = str(item.get('khoan_number') or '0').strip()
+    return khoan == '0'
 
 
 def run_comparison_pipeline(
@@ -31,6 +58,8 @@ def run_comparison_pipeline(
     top_k: int = 3,
     threshold: float = COSINE_LOW,
     hf_token: str | None = None,
+    include_preamble: bool = False,
+    include_non_khoan: bool = False,
     on_progress: Callable[[str, float], None] | None = None,
     embedder=None,
 ) -> dict:
@@ -48,6 +77,8 @@ def run_comparison_pipeline(
         top_k: Number of vector candidates to retrieve.
         threshold: Minimum similarity score for matching.
         hf_token: HuggingFace token (optional).
+        include_preamble: Include Điều 0 rows in report outputs.
+        include_non_khoan: Include non-clause rows (S* sections, Khoan 0).
         on_progress: Callback(step_name, progress_fraction) for UI.
         embedder: Pre-loaded SentenceTransformer instance. When provided,
                   the pipeline skips the model-loading step entirely.
@@ -88,6 +119,9 @@ def run_comparison_pipeline(
     else:
         _progress("Embedding model san sang...", 0.30)
 
+    # Clear stale vectors from previous comparison runs to avoid cross-contamination
+    reset_collection(chroma_dir, collection_name)
+
     _progress("Index v1 vao ChromaDB...", 0.40)
     n1 = index_chunks(chunks_v1, chroma_dir, embedder, collection_name)
 
@@ -109,6 +143,23 @@ def run_comparison_pipeline(
         threshold=threshold,
     )
 
+    # Keep raw internals unchanged, but return clause-level rows by default.
+    report_results = comparison_results
+    if not include_preamble:
+        report_results = [r for r in report_results if not _is_preamble_item(r)]
+    if not include_non_khoan:
+        report_results = [
+            r for r in report_results
+            if not _is_synthetic_section_item(r) and not _is_non_khoan_item(r)
+        ]
+    logger.info(
+        "Filtered output rows: {} -> {} (include_preamble={}, include_non_khoan={})",
+        len(comparison_results),
+        len(report_results),
+        include_preamble,
+        include_non_khoan,
+    )
+
     # ── Step 5: Report ───────────────────────────────────────────────
     _progress("Tao bao cao...", 0.90)
     config = {
@@ -120,22 +171,39 @@ def run_comparison_pipeline(
         'vector_match_threshold': threshold,
     }
 
-    report = build_report(comparison_results, config)
-    summary_df = build_summary_df(comparison_results)
-    citation_df = build_citation_df(comparison_results)
+    report = build_report(report_results, config)
+    summary_df = build_summary_df(report_results)
+    citation_df = build_citation_df(report_results)
+    copilot_report = build_copilot_report(report, max_items=20)
+    copilot_text = render_copilot_text(copilot_report)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     report_filename = f"{file_v1.stem}_vs_{file_v2.stem}_report.json"
     report_path = save_report_json(report, output_dir / report_filename)
+    copilot_json_path = save_copilot_report_json(
+        copilot_report,
+        output_dir / f"{file_v1.stem}_vs_{file_v2.stem}_copilot.json",
+    )
+    copilot_txt_path = save_copilot_report_txt(
+        copilot_text,
+        output_dir / f"{file_v1.stem}_vs_{file_v2.stem}_copilot.txt",
+    )
 
     _progress("Hoan tat!", 1.0)
     logger.info(f"Report saved: {report_path}")
+    logger.info(f"Copilot compact JSON: {copilot_json_path}")
+    logger.info(f"Copilot summary text: {copilot_txt_path}")
+    logger.info("\n" + copilot_text)
 
     return {
         'report': report,
         'summary_df': summary_df,
         'citation_df': citation_df,
         'report_path': report_path,
+        'copilot_report': copilot_report,
+        'copilot_text': copilot_text,
+        'copilot_json_path': copilot_json_path,
+        'copilot_txt_path': copilot_txt_path,
         'chunks_v1': chunks_v1,
         'chunks_v2': chunks_v2,
     }

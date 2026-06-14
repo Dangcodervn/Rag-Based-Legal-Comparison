@@ -237,7 +237,16 @@ with tab_compare:
             progress_bar.progress(1.0, text="Hoàn tất!")
             status_text.empty()
             n = len(result['summary_df'])
-            st.success(f"✅ So sánh hoàn tất — {n} khoản đã phân tích. Báo cáo lưu tại `{result['report_path']}`.")
+            st.success(
+                "✅ So sánh hoàn tất — "
+                f"{n} khoản đã phân tích. Bao cao JSON: {result['report_path']} | "
+                f"Copilot JSON: {result.get('copilot_json_path')} | "
+                f"Copilot TXT: {result.get('copilot_txt_path')}"
+            )
+
+            if result.get('copilot_text'):
+                with st.expander("📄 Tóm tắt nhanh (Copilot-friendly)", expanded=True):
+                    st.text(result['copilot_text'])
         except Exception as exc:
             progress_bar.empty()
             status_text.empty()

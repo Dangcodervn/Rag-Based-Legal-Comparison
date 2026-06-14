@@ -18,7 +18,7 @@ Công cụ so sánh hai phiên bản hợp đồng hoặc văn bản pháp lý t
 - Vẫn giữ tương thích với văn bản có dạng `Điều 1`, `Điều 2`.
 - Đã hoàn thiện phần so sánh v1/v2 và sinh báo cáo thay đổi.
 - Đã có module index vào ChromaDB và truy vấn ngữ nghĩa.
-- Chưa hoàn thiện UI Streamlit.
+- UI chính đã chuyển sang kiến trúc FastAPI + React.
 
 ## Thành phần chính
 
@@ -301,4 +301,4 @@ Với cặp `sample v1.docx` và `sample v2.docx`:
 ## Hướng tiếp theo
 
 - Tích hợp LLM (Qwen2.5 qua Ollama) để tóm tắt thay đổi bằng ngôn ngữ tự nhiên.
-- Làm UI Streamlit để upload tài liệu và xem báo cáo trực quan.
+- Hoàn thiện thêm bộ đánh giá tự động (precision/recall/F1) cho nhiều cặp tài liệu.

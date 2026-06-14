@@ -4,7 +4,7 @@ import uuid
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from loguru import logger  # noqa: F401  (kept for future use)
 
 from src.pipeline import run_comparison_pipeline
@@ -19,6 +19,8 @@ router = APIRouter(tags=["compare"])
 async def compare_documents(
     file_v1: UploadFile = File(...),
     file_v2: UploadFile = File(...),
+    include_preamble: bool = Form(False),
+    include_non_khoan: bool = Form(False),
 ):
     session_id = str(uuid.uuid4())
     tmp_dir = Path(tempfile.mkdtemp(prefix="legal_compare_"))
@@ -48,6 +50,8 @@ async def compare_documents(
                 chroma_dir=chroma_dir,
                 output_dir=output_dir,
                 embedder=embedder,
+                include_preamble=include_preamble,
+                include_non_khoan=include_non_khoan,
             ),
         )
     except Exception as exc:
