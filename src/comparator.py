@@ -241,15 +241,17 @@ def llm_compare_article(
     )
 
     prompt = f"""Ban la tro ly doi chieu van ban phap ly. So sanh 2 phien ban cung mot Khoan.{weak_hint}
+YEU CAU NGON NGU: Viet tat ca noi dung trong truong "conclusion" bang TIENG VIET. Khong dung tieng Anh hay tieng Trung trong conclusion.
 
 QUY TAC BAT BUOC:
 1. Chi dung noi dung trong "Khoan v1" va "Khoan v2". Khong bo sung kien thuc ngoai.
 2. Trang thai CHI duoc la: unchanged | changed | added | removed.
 3. Neu khong co bang chung text ro rang, evidence phai de rong va conclusion ghi ro "Khong du bang chung de ket luan".
 4. Tra ve DUY NHAT JSON hop le, KHONG them markdown hay giai thich.
+5. Truong "conclusion" PHAI viet bang tieng Viet co dau.
 
 SCHEMA:
-{{"status":"unchanged|changed|added|removed","conclusion":"string","evidence":[{{"tag":"changed|added|removed","before":"string","after":"string"}}]}}
+{{"status":"unchanged|changed|added|removed","conclusion":"<tieng Viet>","evidence":[{{"tag":"changed|added|removed","before":"string","after":"string"}}]}}
 
 META: {meta}
 
@@ -333,6 +335,30 @@ def _hybrid_score(cosine: float, bm25_norm: float) -> float:
     return COSINE_WEIGHT * cosine + BM25_WEIGHT * bm25_norm
 
 
+def _body_text(full_text: str, article_title: str) -> str:
+    """Strip the heading line from article text before comparison / embedding.
+
+    DOCX chunks include the heading as the first line, e.g.:
+      '8. BỒI THƯỜNG\n<body...>'
+    When a section is deleted before this one in V2 the number shifts to '7.',
+    causing a spurious diff even though the body is identical.
+
+    The heading line is removed when its uppercase form either equals or ends
+    with the normalised article_title (handles '8. BỒI THƯỜNG' → 'BỒI THƯỜNG').
+    Returns full_text unchanged when the first line doesn’t look like a heading.
+    """
+    if not full_text or not article_title:
+        return full_text or ''
+    title_norm = normalize_ws(article_title).upper().strip()
+    if not title_norm:
+        return full_text
+    lines = full_text.split('\n', 1)
+    first_norm = normalize_ws(lines[0]).upper().strip()
+    if first_norm == title_norm or first_norm.endswith(title_norm):
+        return lines[1].strip() if len(lines) > 1 else ''
+    return full_text
+
+
 def compare_articles_with_vector_retrieval(
     chunks_v1: list[dict],
     chunks_v2: list[dict],
@@ -358,15 +384,38 @@ def compare_articles_with_vector_retrieval(
     left_numbers   = sorted(left_articles.keys(), key=article_sort_key)
     matched_right: set[str] = set()
 
+    # ── Build title → article_no reverse index for V2 ────────────────
+    # Used as Priority 1 matching to handle unnumbered sections (S1, S2...)
+    # where sequential numbering breaks when sections are inserted/deleted.
+    right_title_idx: dict[str, str] = {}
+    for _no, _art in right_articles.items():
+        _key = normalize_ws(_art.get('article_title', '')).upper().strip()
+        if _key:
+            right_title_idx[_key] = _no
+
+    def _is_seq(article_no: str) -> bool:
+        """True for auto-generated sequential S-numbers (unnumbered headings)."""
+        return article_no.startswith('S') and article_no[1:].isdigit()
+
     # ── Opt 1: single ChromaDB connection ────────────────────────────
     collection = get_collection(chroma_dir, collection_name)
 
     # ── Opt 2: batch-embed articles that need vector search ──────────
-    needs_vector = [no for no in left_numbers if no not in right_articles]
+    # S-numbered articles need vector when their title has no V2 match;
+    # Điều-numbered articles need vector only when the number is absent in V2.
+    def _needs_vector_search(no: str) -> bool:
+        if _is_seq(no):
+            title_key = normalize_ws(left_articles[no].get('article_title', '')).upper().strip()
+            return title_key not in right_title_idx
+        return no not in right_articles
+
+    needs_vector = [no for no in left_numbers if _needs_vector_search(no)]
     pre_embeddings: dict[str, list[float]] = {}
     if needs_vector:
         texts = [
-            ViTokenizer.tokenize(normalize_ws(left_articles[no]['full_text']))
+            ViTokenizer.tokenize(normalize_ws(
+                _body_text(left_articles[no]['full_text'], left_articles[no].get('article_title', ''))
+            ))
             for no in needs_vector
         ]
         vecs = embedder.encode(texts, convert_to_numpy=True, show_progress_bar=False)
@@ -381,9 +430,25 @@ def compare_articles_with_vector_retrieval(
         left = left_articles[article_no]
         result_order.append(article_no)
 
-        # Priority 1: exact article_number match
         chosen = None
-        if article_no in right_articles and article_no not in matched_right:
+        # Priority 1: Title exact match (case-insensitive, normalized).
+        # Critical for unnumbered-heading documents (contracts/NDAs) where
+        # sequential S-numbers shift when sections are added/removed mid-doc.
+        left_title_key = normalize_ws(left.get('article_title', '')).upper().strip()
+        if left_title_key:
+            tm = right_title_idx.get(left_title_key)
+            if tm and tm not in matched_right:
+                right_same = right_articles[tm]
+                chosen = {
+                    'article_number': tm,
+                    'article_title':  right_same['article_title'],
+                    'text':           right_same['full_text'],
+                    'similarity':     1.0,
+                }
+
+        # Priority 2: Điều-number exact match (skip for S-prefixed — unreliable).
+        if chosen is None and not _is_seq(article_no) \
+                and article_no in right_articles and article_no not in matched_right:
             right_same = right_articles[article_no]
             chosen = {
                 'article_number': article_no,
@@ -392,7 +457,7 @@ def compare_articles_with_vector_retrieval(
                 'similarity':     1.0,
             }
 
-        # Priority 2: hybrid BM25+Cosine (uses pre-computed embedding)
+        # Priority 3: hybrid BM25+Cosine (uses pre-computed embedding)
         if chosen is None and article_no in pre_embeddings:
             candidates = query_with_vector(
                 pre_embeddings[article_no], collection, 'v2', top_k,
@@ -452,10 +517,15 @@ def compare_articles_with_vector_retrieval(
         right_text = right['full_text'] if right else chosen['text']
         title      = (right or {}).get('article_title', chosen.get('article_title') or left['article_title'])
         similarity = float(chosen.get('similarity', 0.0))
-        before_norm = normalize_ws(left['full_text'])
-        after_norm  = normalize_ws(right_text)
 
-        # Shortcut: texts identical → unchanged, no LLM needed
+        # Strip heading lines before comparing — avoids false diffs when section
+        # numbers shift (e.g. '8. BỒI THƯỜNG' in V1 vs '7. BỒI THƯỜNG' in V2).
+        before_body = _body_text(left['full_text'], left.get('article_title', ''))
+        after_body  = _body_text(right_text, title)
+        before_norm = normalize_ws(before_body)
+        after_norm  = normalize_ws(after_body)
+
+        # Shortcut: body texts identical → unchanged, no LLM needed
         if before_norm == after_norm:
             resolved[article_no] = {
                 'article_number':     article_no,
@@ -481,8 +551,10 @@ def compare_articles_with_vector_retrieval(
         llm_tasks[article_no] = {
             'article_no':   article_no,
             'title':        title,
-            'before':       left['full_text'],
-            'after':        right_text,
+            'before':       before_body,   # body only — no heading number
+            'after':        after_body,    # body only — no heading number
+            'v1_text_full': left['full_text'],
+            'v2_text_full': right_text,
             'match_type':   match_type,
             'matched_no':   matched_article_no,
             'similarity':   similarity,
@@ -548,8 +620,9 @@ def compare_articles_with_vector_retrieval(
             'matched_article_v2': t['matched_no'],
             'match_score':        round(float(t['similarity']), 4),
             **llm_r,
-            'v1_text': t['before'],
-            'v2_text': t['after'],
+            # Use full texts (with heading) for display/side-by-side viewer
+            'v1_text': t.get('v1_text_full', t['before']),
+            'v2_text': t.get('v2_text_full', t['after']),
         })
 
     return results

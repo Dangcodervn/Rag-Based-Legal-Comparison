@@ -305,7 +305,9 @@ def _chunk_plain_text(text, doc_id, version):
     use_explicit = sum(1 for l in lines if DIEU_RE.match(l.strip())) > 0
     cur_no = cur_cid = None
     cur_head, cur_title, cur_body = [], [], []
-    preamble_done = False
+    # For non-explicit documents (contracts/NDAs without Điều numbering), allow
+    # section-heading detection to start immediately without needing a prior Điều/Chương/Mục.
+    preamble_done = not use_explicit
 
     # ── Pre-pass: collect preamble before first Điều/Chương/Mục ─────
     first_structural = next(
@@ -411,14 +413,55 @@ def chunk_document(document, doc_id: str, version: str) -> list[dict]:
     """Chunk a normalized document into article-level chunks."""
     if isinstance(document, dict):
         paragraphs = document.get("paragraphs", [])
-        has_headings = sum(
-            1 for p in paragraphs
-            if p.get("heading_level") == 1 and p.get("numbering_label")
-        ) > 0
+        # Use heading-based chunking if ANY paragraph has a Word Heading 1 style,
+        # numbered or not (covers both law documents and contracts/NDAs).
+        has_headings = any(p.get("heading_level") == 1 for p in paragraphs)
         if has_headings:
             return _chunk_docx_headings(document, doc_id, version)
         return _chunk_plain_text(document.get("text", ""), doc_id, version)
     return _chunk_plain_text(document, doc_id, version)
+
+
+def _strip_article_heading_from_khoan(
+    khoan_text: str, article_title: str, khoan_number: str,
+) -> str:
+    """Remove article title (Điều heading) from the start of khoan text.
+    
+    When articles are extracted, the first line may incorrectly contain the Điều heading.
+    This function strips it if found, ensuring khoan text is clean body content only.
+    
+    Examples:
+      "8. BỒI THƯỜNG\n1) Full text..." → "1) Full text..."
+      "BỒI THƯỜNG\n1) Full text..." → "1) Full text..."
+      "1) Full text..." → "1) Full text..." (no change)
+    """
+    if not khoan_text:
+        return khoan_text
+    
+    lines = khoan_text.split('\n', 1)
+    if len(lines) < 2:
+        return khoan_text
+    
+    first_line = lines[0].strip()
+    if not first_line:
+        return khoan_text
+    
+    # Normalize for comparison
+    first_upper = re.sub(r'\s+', ' ', first_line).upper()
+    title_upper = re.sub(r'\s+', ' ', article_title).upper().strip()
+    
+    # Check if first line ends with or equals the article title (e.g., "8. BỒI THƯỜNG" ends with "BỒI THƯƠNG")
+    if title_upper and (first_upper.endswith(title_upper) or first_upper == title_upper):
+        return lines[1].strip()
+    
+    # Also strip bare khoan number if it matches the current khoan
+    # (e.g., "1" at the start when we're processing khoan "1")
+    khoan_re_match = KHOAN_RE.match(first_line)
+    if khoan_re_match and khoan_re_match.group(1).rstrip('.') == khoan_number:
+        # This is the khoan number line being repeated; remove it
+        return lines[1].strip() if len(lines) > 1 else ''
+    
+    return khoan_text
 
 
 def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
@@ -428,13 +471,14 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
     - article_number = "{dieu}.{khoan}" composite key (e.g. "1.2")
     - dieu_number    = original Điều number (e.g. "1")
     - khoan_number   = Khoản number (e.g. "2")
-    - text           = the Khoản's body text
+    - text           = the Khoản's body text (Điều heading stripped)
 
     Chunks without khoan_items are passed through with khoan_number="0".
     """
     result = []
     for chunk in chunks:
         dieu_no = str(chunk.get('article_number', ''))
+        article_title = str(chunk.get('article_title', ''))
         khoan_items = chunk.get('khoan_items') or []
 
         if not khoan_items:
@@ -451,6 +495,12 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             khoan_text = khoan.get('text', '').strip()
             if not khoan_text:
                 continue
+            
+            # Strip Điều heading from khoan text to keep it clean
+            khoan_text = _strip_article_heading_from_khoan(khoan_text, article_title, khoan_no)
+            if not khoan_text:
+                continue
+            
             out = dict(chunk)
             out['chunk_id'] = f"{chunk['chunk_id']}_k{khoan_no}"
             out['article_number'] = f"{dieu_no}.{khoan_no}"
