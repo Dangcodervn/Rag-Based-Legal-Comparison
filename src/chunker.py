@@ -11,7 +11,7 @@ MUC_RE = re.compile(r"^Mục\s+(\d+)[\.:]?\s*(.*)", re.IGNORECASE)
 DIEU_RE = re.compile(
     r"^(?:Điều|ĐIỀU|dieu|DIEU)\s+((?:\d+[A-Za-z]?|[IVXLCDM]+))[\.:]?\s*(.*)$"
 )
-KHOAN_RE = re.compile(r"^(\d+)[\.)]\s*(.*)$")
+KHOAN_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:[\.)])\s*(.*)$")
 DIEM_RE = re.compile(r"^([a-zđ])[\.)]\s*(.*)$", re.IGNORECASE)
 DINH_NGHIA_RE = re.compile(r"giải thích từ ngữ|định nghĩa|diễn giải", re.IGNORECASE)
 
@@ -176,16 +176,8 @@ def _build_chunk(
 def _chunk_docx_headings(document, doc_id, version):
     paragraphs = document.get("paragraphs", [])
     chunks, chunk_idx = [], 1
-    article_state = {
-        "article_number": "0",
-        "article_title": "Phần mở đầu",
-        "heading_display": "",
-        "body_lines": [],
-        "khoan_items": [],
-    }
+    article_state = None
     current_khoan, current_tieu_muc = None, None
-    auto_sec_idx = 0  # counter for auto-numbered unnumbered sections
-    has_seen_numbered = False  # flag: we've entered at least one numbered article
 
     def flush():
         nonlocal article_state, current_khoan, current_tieu_muc, chunk_idx
@@ -199,7 +191,7 @@ def _chunk_docx_headings(document, doc_id, version):
             chunks.append(_build_chunk(
                 chunk_idx=chunk_idx, doc_id=doc_id, version=version,
                 chuong_so="0", muc_so="0",
-                clause_id=f"article_{article_state['article_number']}",
+                clause_id=article_state["clause_id"],
                 article_number=article_state["article_number"],
                 article_title=article_state["article_title"],
                 text=block, khoan_items=article_state["khoan_items"],
@@ -214,43 +206,24 @@ def _chunk_docx_headings(document, doc_id, version):
         nl = para.get("numbering_label")
         np_ = para.get("numbering_path") or []
 
-        if hl == 1 and nl:
+        heading_text = dt.strip() or text
+        md = DIEU_RE.match(heading_text)
+        if md:
             flush()
-            has_seen_numbered = True
+            article_no = str(md.group(1)).strip()
+            article_title = _clean_heading(md.group(2).strip() or f"Điều {article_no}")
             article_state = {
-                "article_number": np_[0] if np_ else nl.rstrip("."),
-                "article_title": _clean_heading(text),
-                "heading_display": dt.strip(),
+                "article_number": article_no,
+                "clause_id": f"article_{article_no}",
+                "article_title": article_title,
+                "heading_display": heading_text,
                 "body_lines": [],
                 "khoan_items": [],
             }
             continue
 
-        # Unnumbered H1 heading (heading style but no list number)
-        if hl == 1 and not nl:
-            flush()
-            auto_sec_idx += 1
-            article_state = {
-                "article_number": f"S{auto_sec_idx}",
-                "article_title": _clean_heading(text),
-                "heading_display": dt.strip(),
-                "body_lines": [],
-                "khoan_items": [],
-            }
-            continue
-
-        # Plain-text paragraph that looks like a standalone Vietnamese section title
-        # (added without Word heading style - common when editing DOCX manually)
-        if hl is None and not nl and has_seen_numbered and _looks_vi_section_title(text):
-            flush()
-            auto_sec_idx += 1
-            article_state = {
-                "article_number": f"S{auto_sec_idx}",
-                "article_title": _clean_heading(text),
-                "heading_display": dt.strip(),
-                "body_lines": [],
-                "khoan_items": [],
-            }
+        # Strict mode: ignore non-Điều content before the first Điều.
+        if article_state is None:
             continue
 
         if hl == 2 and nl:
@@ -303,6 +276,9 @@ def _chunk_plain_text(text, doc_id, version):
     chunks, chunk_idx, section_seq = [], 1, 1
     cur_chuong, cur_muc = "0", "0"
     use_explicit = sum(1 for l in lines if DIEU_RE.match(l.strip())) > 0
+    if not use_explicit:
+        # Strict Điều/Khoản mode: documents without explicit Điều are skipped.
+        return []
     cur_no = cur_cid = None
     cur_head, cur_title, cur_body = [], [], []
     # For non-explicit documents (contracts/NDAs without Điều numbering), allow
@@ -478,14 +454,13 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
     result = []
     for chunk in chunks:
         dieu_no = str(chunk.get('article_number', ''))
+        clause_id = str(chunk.get('clause_id') or '')
+        is_synthetic_section = clause_id.startswith('section_')
         article_title = str(chunk.get('article_title', ''))
         khoan_items = chunk.get('khoan_items') or []
 
         if not khoan_items:
-            out = dict(chunk)
-            out['dieu_number'] = dieu_no
-            out['khoan_number'] = '0'
-            result.append(out)
+            # Strict Điều/Khoản mode: skip chunks that have no khoản items.
             continue
 
         for khoan in khoan_items:
@@ -496,16 +471,21 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             if not khoan_text:
                 continue
             
+            # If khoan_no is already composite (e.g., "1.1" from DOCX H2 numbering),
+            # extract only the final part (e.g., "1" from "1.1").
+            # This prevents duplicate dieu_numbers in article_number (e.g., "1.1.1").
+            khoan_final = khoan_no.split('.')[-1] if '.' in khoan_no else khoan_no
+            
             # Strip Điều heading from khoan text to keep it clean
-            khoan_text = _strip_article_heading_from_khoan(khoan_text, article_title, khoan_no)
+            khoan_text = _strip_article_heading_from_khoan(khoan_text, article_title, khoan_final)
             if not khoan_text:
                 continue
             
             out = dict(chunk)
-            out['chunk_id'] = f"{chunk['chunk_id']}_k{khoan_no}"
-            out['article_number'] = f"{dieu_no}.{khoan_no}"
+            out['chunk_id'] = f"{chunk['chunk_id']}_k{khoan_final}"
+            out['article_number'] = f"{dieu_no}.{khoan_final}"
             out['dieu_number'] = dieu_no
-            out['khoan_number'] = khoan_no
+            out['khoan_number'] = khoan_final
             out['text'] = khoan_text
             out['char_len'] = len(khoan_text)
             out['khoan_items'] = []

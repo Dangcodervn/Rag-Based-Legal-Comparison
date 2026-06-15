@@ -36,7 +36,11 @@ def _is_preamble_item(item: dict) -> bool:
 
 
 def _is_synthetic_section_item(item: dict) -> bool:
-    """Return True for auto-generated unnumbered sections (S1, S2, ...)."""
+    """Return True for auto-generated unnumbered sections (non-Điều)."""
+    clause_id = str(item.get('clause_id') or '').strip().lower()
+    if clause_id.startswith('section_'):
+        return True
+    # Backward compatibility for older outputs that used S1/S2 numbering.
     dieu = str(item.get('dieu_number') or item.get('article_number') or '').strip().upper()
     return dieu.startswith('S') and dieu[1:].isdigit()
 

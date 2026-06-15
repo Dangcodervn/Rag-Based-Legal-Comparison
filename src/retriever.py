@@ -10,12 +10,22 @@ from src.indexer import get_collection
 
 
 def article_sort_key(article_no: str):
-    """Sort key for article numbers (numeric first, then alpha suffix)."""
-    text = str(article_no)
-    match = re.match(r'^(\d+)([A-Za-z]*)$', text)
-    if match:
-        return (0, int(match.group(1)), match.group(2))
-    return (1, text)
+    """Sort key for article numbers, supporting composite keys like '1.10'.
+
+    Splits on '.' and sorts each level numerically so that clause order is
+    natural: 1.1, 1.2, ..., 1.9, 1.10, 1.11 (not the lexical 1.1, 1.10, 1.2).
+    Numeric levels rank before non-numeric ones (e.g. synthetic sections, roman
+    numerals), keeping Điều/Khoản ahead of synthetic sections.
+    """
+    parts = str(article_no).split('.')
+    key = []
+    for part in parts:
+        match = re.match(r'^(\d+)([A-Za-z]*)$', part)
+        if match:
+            key.append((0, int(match.group(1)), match.group(2)))
+        else:
+            key.append((1, 0, part))
+    return key
 
 
 def build_articles_from_chunks(chunks: list[dict]) -> dict[str, dict]:
@@ -26,12 +36,22 @@ def build_articles_from_chunks(chunks: list[dict]) -> dict[str, dict]:
         if not article_no:
             continue
         if article_no not in articles:
+            # Extract dieu_number, which is ALWAYS set by chunker (never None).
+            # For khoan-exploded chunks: article_no='1.1', dieu_number='1'
+            # For article-level chunks: article_no='1', dieu_number='1'
+            # Never fallback article_no to dieu_number, as that would confuse composite keys.
+            dieu_no = str(row.get('dieu_number') or '').strip()
+            if not dieu_no:
+                # If somehow missing, extract from article_no (split on last dot for khoan case)
+                parts = article_no.rsplit('.', 1)
+                dieu_no = parts[0] if len(parts) > 1 else article_no
             articles[article_no] = {
                 'article_number': article_no,
                 'article_title': row.get('article_title', f'Dieu {article_no}'),
                 'full_text': row.get('text', ''),
                 'chunk_id': row.get('chunk_id', ''),
-                'dieu_number': str(row.get('dieu_number') or article_no),
+                'clause_id': str(row.get('clause_id') or ''),
+                'dieu_number': dieu_no,
                 'khoan_number': str(row.get('khoan_number') or '0'),
             }
         else:

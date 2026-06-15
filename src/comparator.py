@@ -385,26 +385,31 @@ def compare_articles_with_vector_retrieval(
     matched_right: set[str] = set()
 
     # ── Build title → article_no reverse index for V2 ────────────────
-    # Used as Priority 1 matching to handle unnumbered sections (S1, S2...)
-    # where sequential numbering breaks when sections are inserted/deleted.
+    # Used as Priority 1 matching to handle unnumbered synthetic sections
+    # where sequential numbering can shift after inserts/deletes.
     right_title_idx: dict[str, str] = {}
     for _no, _art in right_articles.items():
         _key = normalize_ws(_art.get('article_title', '')).upper().strip()
         if _key:
             right_title_idx[_key] = _no
 
-    def _is_seq(article_no: str) -> bool:
-        """True for auto-generated sequential S-numbers (unnumbered headings)."""
+    def _is_synthetic_section(article_no: str, article: dict) -> bool:
+        """True for auto-generated unnumbered sections (non-Điều)."""
+        clause_id = str(article.get('clause_id') or '').strip().lower()
+        if clause_id.startswith('section_'):
+            return True
+        # Backward compatibility for older outputs that used S-prefix.
         return article_no.startswith('S') and article_no[1:].isdigit()
 
     # ── Opt 1: single ChromaDB connection ────────────────────────────
     collection = get_collection(chroma_dir, collection_name)
 
     # ── Opt 2: batch-embed articles that need vector search ──────────
-    # S-numbered articles need vector when their title has no V2 match;
+    # Synthetic unnumbered sections need vector when title has no V2 match;
     # Điều-numbered articles need vector only when the number is absent in V2.
     def _needs_vector_search(no: str) -> bool:
-        if _is_seq(no):
+        left_article = left_articles[no]
+        if _is_synthetic_section(no, left_article):
             title_key = normalize_ws(left_articles[no].get('article_title', '')).upper().strip()
             return title_key not in right_title_idx
         return no not in right_articles
@@ -422,6 +427,17 @@ def compare_articles_with_vector_retrieval(
         pre_embeddings = {no: vecs[i].tolist() for i, no in enumerate(needs_vector)}
 
     # ── Pass 1: resolve all pairs, collect LLM tasks ─────────────────
+    def _reserve_task_key(base: str) -> str:
+        """Create a collision-free internal key for llm_tasks/result_order."""
+        if base not in llm_tasks and base not in resolved:
+            return base
+        i = 1
+        while True:
+            candidate = f"{base}__v2_only_{i}"
+            if candidate not in llm_tasks and candidate not in resolved:
+                return candidate
+            i += 1
+
     result_order: list[str] = []
     resolved:  dict[str, dict] = {}   # results that don't need LLM
     llm_tasks: dict[str, dict] = {}   # tasks that need LLM
@@ -433,9 +449,9 @@ def compare_articles_with_vector_retrieval(
         chosen = None
         # Priority 1: Title exact match (case-insensitive, normalized).
         # Critical for unnumbered-heading documents (contracts/NDAs) where
-        # sequential S-numbers shift when sections are added/removed mid-doc.
+        # synthetic section numbering can shift when sections are added/removed.
         left_title_key = normalize_ws(left.get('article_title', '')).upper().strip()
-        if left_title_key:
+        if _is_synthetic_section(article_no, left) and left_title_key:
             tm = right_title_idx.get(left_title_key)
             if tm and tm not in matched_right:
                 right_same = right_articles[tm]
@@ -446,8 +462,8 @@ def compare_articles_with_vector_retrieval(
                     'similarity':     1.0,
                 }
 
-        # Priority 2: Điều-number exact match (skip for S-prefixed — unreliable).
-        if chosen is None and not _is_seq(article_no) \
+        # Priority 2: Điều-number exact match (skip synthetic sections — unreliable).
+        if chosen is None and not _is_synthetic_section(article_no, left) \
                 and article_no in right_articles and article_no not in matched_right:
             right_same = right_articles[article_no]
             chosen = {
@@ -531,6 +547,7 @@ def compare_articles_with_vector_retrieval(
                 'article_number':     article_no,
                 'dieu_number':        left.get('dieu_number', article_no),
                 'khoan_number':       left.get('khoan_number', '0'),
+                'clause_id':          left.get('clause_id', ''),
                 'article_title':      title,
                 'matched_article_v2': matched_article_no,
                 'match_score':        round(similarity, 4),
@@ -560,6 +577,7 @@ def compare_articles_with_vector_retrieval(
             'similarity':   similarity,
             'dieu_number':  left.get('dieu_number', article_no),
             'khoan_number': left.get('khoan_number', '0'),
+            'clause_id':    left.get('clause_id', ''),
             'v2_only':      False,
         }
 
@@ -568,8 +586,9 @@ def compare_articles_with_vector_retrieval(
         if article_no in matched_right:
             continue
         right = right_articles[article_no]
-        result_order.append(article_no)
-        llm_tasks[article_no] = {
+        task_key = _reserve_task_key(article_no)
+        result_order.append(task_key)
+        llm_tasks[task_key] = {
             'article_no':   article_no,
             'title':        right['article_title'],
             'before':       None,
@@ -579,6 +598,7 @@ def compare_articles_with_vector_retrieval(
             'similarity':   0.0,
             'dieu_number':  right.get('dieu_number', article_no),
             'khoan_number': right.get('khoan_number', '0'),
+            'clause_id':    right.get('clause_id', ''),
             'v2_only':      True,
         }
 
@@ -606,16 +626,17 @@ def compare_articles_with_vector_retrieval(
 
     # ── Pass 3: assemble results in original order ────────────────────
     results: list[dict] = []
-    for article_no in result_order:
-        if article_no in resolved:
-            results.append(resolved[article_no])
+    for task_key in result_order:
+        if task_key in resolved:
+            results.append(resolved[task_key])
             continue
-        t     = llm_tasks[article_no]
-        llm_r = llm_results[article_no]
+        t     = llm_tasks[task_key]
+        llm_r = llm_results[task_key]
         results.append({
-            'article_number':     article_no,
+            'article_number':     t['article_no'],
             'dieu_number':        t['dieu_number'],
             'khoan_number':       t['khoan_number'],
+            'clause_id':          t.get('clause_id', ''),
             'article_title':      t['title'],
             'matched_article_v2': t['matched_no'],
             'match_score':        round(float(t['similarity']), 4),

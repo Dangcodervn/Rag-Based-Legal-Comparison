@@ -7,7 +7,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // Use IPv4 loopback explicitly to avoid localhost/IPv6 resolution
+        // mismatches that can surface as ECONNREFUSED in Vite proxy logs.
+        target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
     },

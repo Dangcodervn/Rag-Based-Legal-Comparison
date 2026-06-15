@@ -67,9 +67,8 @@ export default function DocViewer({ url, title }: Props) {
           inWrapper: true,
           ignoreWidth: false,
           ignoreHeight: false,
-          ignoreFont: false,
+          ignoreFonts: false,
           useBase64URL: true,
-          defaultFont: { name: "Times New Roman", size: 12 },
         }),
       )
       .then(() => setStatus("done"))
