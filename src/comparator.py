@@ -366,6 +366,22 @@ def _body_text(full_text: str, article_title: str) -> str:
     return full_text
 
 
+# Leading clause-number prefix like '9.1.', '10.4.', '9.', 'a)', '1)'.
+_CLAUSE_PREFIX_RE = re.compile(r'^\s*(?:\d+(?:\.\d+)*\.?|[a-zđ]\)|\(\d+\)|\d+\))\s*')
+
+
+def _compare_key(body_text: str) -> str:
+    """Normalise body text for equality comparison only (not for display).
+
+    Strips the leading clause-number prefix so that a clause whose only change
+    is renumbering (e.g. '9.1. ...' in V1 vs '8.1. ...' in V2, same body) is
+    correctly detected as *unchanged* instead of being sent to the LLM as a
+    false 'changed'. The original text is kept intact for display / evidence.
+    """
+    text = normalize_ws(body_text or '')
+    return _CLAUSE_PREFIX_RE.sub('', text).strip()
+
+
 def compare_articles_with_vector_retrieval(
     chunks_v1: list[dict],
     chunks_v2: list[dict],
@@ -426,7 +442,10 @@ def compare_articles_with_vector_retrieval(
             ))
             for no in needs_vector
         ]
-        vecs = embedder.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        vecs = embedder.encode(
+            texts, convert_to_numpy=True, show_progress_bar=False,
+            normalize_embeddings=True,
+        )
         pre_embeddings = {no: vecs[i].tolist() for i, no in enumerate(needs_vector)}
 
     # ── Pass 1: resolve all pairs, collect LLM tasks ─────────────────
@@ -499,19 +518,32 @@ def compare_articles_with_vector_retrieval(
                 }
                 break
 
-        # No match → removed (v1-only)
+        # No match → removed (v1-only). Deterministic, no LLM needed: a clause
+        # with no counterpart in V2 is unambiguously removed.
         if chosen is None:
-            llm_tasks[article_no] = {
-                'article_no':   article_no,
-                'title':        left['article_title'],
-                'before':       left['full_text'],
-                'after':        None,
-                'match_type':   'no_match',
-                'matched_no':   None,
-                'similarity':   0.0,
-                'dieu_number':  left.get('dieu_number', article_no),
-                'khoan_number': left.get('khoan_number', '0'),
-                'v2_only':      False,
+            before_full = left['full_text']
+            before_norm_full = normalize_ws(_body_text(before_full, left.get('article_title', '')))
+            resolved[article_no] = {
+                'article_number':     article_no,
+                'dieu_number':        left.get('dieu_number', article_no),
+                'khoan_number':       left.get('khoan_number', '0'),
+                'clause_id':          left.get('clause_id', ''),
+                'article_title':      left['article_title'],
+                'matched_article_v2': None,
+                'match_score':        0.0,
+                'status':             'removed',
+                'conclusion':         'Dieu khoan bi loai bo so voi v1.',
+                'evidence':           _normalize_evidence_items(
+                    extract_evidence(before_norm_full, '', max_items=2), max_items=2,
+                ),
+                'diff_blocks':        build_diff_blocks(before_full, None),
+                'llm_model':          None,
+                'llm_used':           False,
+                'fallback_reason':    'no_match_removed',
+                'grounded':           True,
+                'v2_only':            False,
+                'v1_text':            before_full,
+                'v2_text':            '',
             }
             continue
 
@@ -530,7 +562,9 @@ def compare_articles_with_vector_retrieval(
         after_norm  = normalize_ws(after_body)
 
         # Shortcut: body texts identical → unchanged, no LLM needed
-        if before_norm == after_norm:
+        # Compare with clause-number prefixes stripped so that a pure
+        # renumbering (e.g. '9.1.'→'8.1.') with identical body is unchanged.
+        if _compare_key(before_body) == _compare_key(after_body):
             resolved[article_no] = {
                 'article_number':     article_no,
                 'dieu_number':        left.get('dieu_number', article_no),
@@ -569,25 +603,37 @@ def compare_articles_with_vector_retrieval(
             'v2_only':      False,
         }
 
-    # Articles only in v2 (added)
+    # Articles only in v2 (added). Deterministic, no LLM needed: a clause with
+    # no counterpart in V1 is unambiguously added.
     for article_no in sorted(right_articles.keys(), key=article_sort_key):
         if article_no in matched_right:
             continue
         right = right_articles[article_no]
-        task_key = _reserve_task_key(article_no)
-        result_order.append(task_key)
-        llm_tasks[task_key] = {
-            'article_no':   article_no,
-            'title':        right['article_title'],
-            'before':       None,
-            'after':        right['full_text'],
-            'match_type':   'added',
-            'matched_no':   article_no,
-            'similarity':   0.0,
-            'dieu_number':  right.get('dieu_number', article_no),
-            'khoan_number': right.get('khoan_number', '0'),
-            'clause_id':    right.get('clause_id', ''),
-            'v2_only':      True,
+        result_key = _reserve_task_key(article_no)
+        result_order.append(result_key)
+        after_full = right['full_text']
+        after_norm_full = normalize_ws(_body_text(after_full, right.get('article_title', '')))
+        resolved[result_key] = {
+            'article_number':     article_no,
+            'dieu_number':        right.get('dieu_number', article_no),
+            'khoan_number':       right.get('khoan_number', '0'),
+            'clause_id':          right.get('clause_id', ''),
+            'article_title':      right['article_title'],
+            'matched_article_v2': article_no,
+            'match_score':        0.0,
+            'status':             'added',
+            'conclusion':         'Dieu khoan duoc bo sung trong v2.',
+            'evidence':           _normalize_evidence_items(
+                extract_evidence('', after_norm_full, max_items=2), max_items=2,
+            ),
+            'diff_blocks':        build_diff_blocks(None, after_full),
+            'llm_model':          None,
+            'llm_used':           False,
+            'fallback_reason':    'v2_only_added',
+            'grounded':           True,
+            'v2_only':            True,
+            'v1_text':            '',
+            'v2_text':            after_full,
         }
 
     # ── Opt 3: run LLM calls in parallel ─────────────────────────────

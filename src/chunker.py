@@ -510,7 +510,26 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
         khoan_items = chunk.get('khoan_items') or []
 
         if not khoan_items:
-            # Strict Điều/Khoản mode: skip chunks that have no khoản items.
+            # Fallback: an article with body text but no detected Khoản (its
+            # content is plain paragraphs / a bullet list rather than numbered
+            # clauses, e.g. "Tiến Độ Thực Hiện Dự Án"). Emit a single
+            # article-level chunk (khoan_number='0') so the content is not lost
+            # — otherwise a removed/added/changed article without clauses would
+            # silently disappear from the comparison report.
+            body = str(chunk.get('text', '')).strip()
+            if is_synthetic_section or not body:
+                continue
+            stripped = _strip_article_heading_from_khoan(body, article_title, '0')
+            body = stripped.strip() if stripped else body
+            if not body:
+                continue
+            out = dict(chunk)
+            out['dieu_number'] = dieu_no
+            out['khoan_number'] = '0'
+            out['text'] = body
+            out['char_len'] = len(body)
+            out['khoan_items'] = []
+            result.append(out)
             continue
 
         seen_suffixes: dict[str, int] = {}

@@ -63,9 +63,17 @@ def build_articles_from_chunks(chunks: list[dict]) -> dict[str, dict]:
 
 
 def _distance_to_similarity(distance: float | int | None) -> float:
+    """Convert ChromaDB cosine distance to cosine similarity.
+
+    The collection uses cosine space (hnsw:space='cosine') and embeddings are
+    L2-normalized, so ChromaDB returns cosine distance = 1 - cosine_similarity.
+    Therefore similarity = 1 - distance. Clamp to [0, 1] for floating-point and
+    near-orthogonal edge cases.
+    """
     if distance is None:
         return 0.0
-    return 1.0 / (1.0 + float(distance))
+    similarity = 1.0 - float(distance)
+    return max(0.0, min(1.0, similarity))
 
 
 def query_candidates_for_article(
@@ -79,7 +87,9 @@ def query_candidates_for_article(
     """Query ChromaDB for candidate matching articles in target_version."""
     collection = get_collection(chroma_dir, collection_name)
     query_text = ViTokenizer.tokenize(normalize_ws(article_text))
-    query_vector = embedder.encode([query_text], convert_to_numpy=True)[0].tolist()
+    query_vector = embedder.encode(
+        [query_text], convert_to_numpy=True, normalize_embeddings=True,
+    )[0].tolist()
 
     result = collection.query(
         query_embeddings=[query_vector],

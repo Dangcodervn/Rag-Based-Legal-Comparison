@@ -12,10 +12,18 @@ def load_embedder(model_name: str, hf_token: str | None = None):
     return SentenceTransformer(model_name, token=hf_token)
 
 
+# Cosine space + L2-normalized embeddings: ChromaDB returns cosine distance in
+# [0, 2], so similarity = 1 - distance is a true cosine similarity in [-1, 1].
+# This keeps COSINE_LOW / COSINE_HIGH thresholds meaningful.
+_COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
+
 def get_collection(chroma_dir: Path | str, collection_name: str = "legal_chunks"):
-    """Get or create a ChromaDB collection."""
+    """Get or create a ChromaDB collection (cosine space)."""
     client = chromadb.PersistentClient(path=str(chroma_dir))
-    return client.get_or_create_collection(collection_name)
+    return client.get_or_create_collection(
+        collection_name, metadata=_COLLECTION_METADATA,
+    )
 
 
 def reset_collection(chroma_dir: Path | str, collection_name: str = "legal_chunks"):
@@ -32,14 +40,25 @@ def reset_collection(chroma_dir: Path | str, collection_name: str = "legal_chunk
     except Exception:
         # Collection may not exist yet on first run — safe to ignore.
         pass
-    return client.get_or_create_collection(collection_name)
+    return client.get_or_create_collection(
+        collection_name, metadata=_COLLECTION_METADATA,
+    )
 
 
 def embed_chunks(chunks: list[dict], embedder) -> list[list[float]]:
-    """Embed chunk texts using ViTokenizer segmentation + embedder."""
+    """Embed chunk texts using ViTokenizer segmentation + embedder.
+
+    Embeddings are L2-normalized so ChromaDB cosine distance and the downstream
+    similarity conversion stay consistent.
+    """
     texts = [c["text"] for c in chunks]
     segmented = [ViTokenizer.tokenize(t) for t in texts]
-    vectors = embedder.encode(segmented, convert_to_numpy=True, show_progress_bar=True)
+    vectors = embedder.encode(
+        segmented,
+        convert_to_numpy=True,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+    )
     return [v.tolist() for v in vectors]
 
 

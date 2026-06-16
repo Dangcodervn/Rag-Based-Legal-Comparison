@@ -1,5 +1,6 @@
 """End-to-end comparison pipeline: files → report."""
 
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -46,9 +47,22 @@ def _is_synthetic_section_item(item: dict) -> bool:
 
 
 def _is_non_khoan_item(item: dict) -> bool:
-    """Return True for rows that are not clause-level (Khoan 0 / missing)."""
+    """Return True for rows that are neither a clause nor a genuine article body.
+
+    A row with khoan_number='0' is normally article-level noise. The exception
+    is a whole article that genuinely has no numbered clauses (its body is plain
+    paragraphs / a bullet list). Such an article is real content and must be
+    kept so that removed/added/changed articles without clauses (e.g. "Tiến Độ
+    Thực Hiện Dự Án") are not silently dropped from the report.
+    """
     khoan = str(item.get('khoan_number') or '0').strip()
-    return khoan == '0'
+    if khoan != '0':
+        return False
+    dieu = str(item.get('dieu_number') or item.get('article_number') or '').strip()
+    body = str(item.get('v1_text') or item.get('v2_text') or '').strip()
+    if dieu and dieu != '0' and len(body) >= 40:
+        return False  # genuine article body — keep it
+    return True
 
 
 def run_comparison_pipeline(
@@ -193,10 +207,22 @@ def run_comparison_pipeline(
         output_dir / f"{file_v1.stem}_vs_{file_v2.stem}_copilot.txt",
     )
 
+    # Persist the raw V1/V2 chunks used for this comparison for inspection.
+    chunks_v1_path = output_dir / f"{file_v1.stem}__v1_chunks.json"
+    chunks_v2_path = output_dir / f"{file_v2.stem}__v2_chunks.json"
+    chunks_v1_path.write_text(
+        json.dumps(chunks_v1, ensure_ascii=False, indent=2), encoding='utf-8',
+    )
+    chunks_v2_path.write_text(
+        json.dumps(chunks_v2, ensure_ascii=False, indent=2), encoding='utf-8',
+    )
+
     _progress("Hoan tat!", 1.0)
     logger.info(f"Report saved: {report_path}")
     logger.info(f"Copilot compact JSON: {copilot_json_path}")
     logger.info(f"Copilot summary text: {copilot_txt_path}")
+    logger.info(f"V1 chunks: {chunks_v1_path}")
+    logger.info(f"V2 chunks: {chunks_v2_path}")
     logger.info("\n" + copilot_text)
 
     return {
@@ -210,4 +236,6 @@ def run_comparison_pipeline(
         'copilot_txt_path': copilot_txt_path,
         'chunks_v1': chunks_v1,
         'chunks_v2': chunks_v2,
+        'chunks_v1_path': chunks_v1_path,
+        'chunks_v2_path': chunks_v2_path,
     }
