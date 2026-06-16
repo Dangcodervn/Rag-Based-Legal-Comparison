@@ -11,7 +11,10 @@ MUC_RE = re.compile(r"^Mục\s+(\d+)[\.:]?\s*(.*)", re.IGNORECASE)
 DIEU_RE = re.compile(
     r"^(?:Điều|ĐIỀU|dieu|DIEU)\s+((?:\d+[A-Za-z]?|[IVXLCDM]+))[\.:]?\s*(.*)$"
 )
-KHOAN_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:[\.)])\s*(.*)$")
+# Support common DOCX numbering renderings:
+# - "1) ...", "1. ..."
+# - "1.1 ...", "1.2.1 ..." (no trailing dot after last numeric segment)
+KHOAN_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:[\.)])?\s*(.*)$")
 DIEM_RE = re.compile(r"^([a-zđ])[\.)]\s*(.*)$", re.IGNORECASE)
 DINH_NGHIA_RE = re.compile(r"giải thích từ ngữ|định nghĩa|diễn giải", re.IGNORECASE)
 
@@ -204,6 +207,7 @@ def _chunk_docx_headings(document, doc_id, version):
         dt = para.get("display_text") or text
         hl = para.get("heading_level")
         nl = para.get("numbering_label")
+        ilvl = para.get("ilvl")
         np_ = para.get("numbering_path") or []
 
         heading_text = dt.strip() or text
@@ -256,6 +260,52 @@ def _chunk_docx_headings(document, doc_id, version):
                 p for p in [current_khoan["text"], dt.strip()] if p
             ).strip()
             article_state["body_lines"].append(dt.strip())
+            continue
+
+        # Fallback for contracts where Khoản/Điểm are auto-numbered paragraphs
+        # without Heading 2/3 styles.
+        line = dt.strip()
+        km = KHOAN_RE.match(line)
+        if km:
+            khoan_no = km.group(1).rstrip(".")
+            depth = khoan_no.count(".")
+            # Nested numbered lines (e.g. 1.2.1) are sub-items, not new khoản.
+            if ((ilvl is not None and ilvl >= 2) or depth >= 2) and current_khoan is not None:
+                current_tieu_muc = {
+                    "tieu_muc_number": khoan_no,
+                    "title": "",
+                    "text": line,
+                }
+                current_khoan["tieu_muc_items"].append(current_tieu_muc)
+                current_khoan["text"] = "\n".join(
+                    p for p in [current_khoan["text"], line] if p
+                ).strip()
+                article_state["body_lines"].append(line)
+                continue
+            current_khoan = {
+                "khoan_number": khoan_no,
+                "title": "",
+                "text": line,
+                "diem_items": [],
+                "tieu_muc_items": [],
+            }
+            current_tieu_muc = None
+            article_state["khoan_items"].append(current_khoan)
+            article_state["body_lines"].append(line)
+            continue
+
+        dm = DIEM_RE.match(line)
+        if dm and current_khoan is not None:
+            diem_val = dm.group(1).strip()
+            current_khoan["diem_items"].append({
+                "diem_number": diem_val,
+                "diem_key": diem_val,
+                "text": dm.group(2).strip(),
+            })
+            current_khoan["text"] = "\n".join(
+                p for p in [current_khoan["text"], line] if p
+            ).strip()
+            article_state["body_lines"].append(line)
             continue
 
         article_state["body_lines"].append(dt.strip())
@@ -463,9 +513,13 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             # Strict Điều/Khoản mode: skip chunks that have no khoản items.
             continue
 
+        seen_suffixes: dict[str, int] = {}
         for khoan in khoan_items:
             khoan_no = str(khoan.get('khoan_number', '')).strip()
             if not khoan_no:
+                continue
+            # Ignore deep numbering (e.g. 1.2.1) because these are sub-items.
+            if khoan_no.count('.') >= 2:
                 continue
             khoan_text = khoan.get('text', '').strip()
             if not khoan_text:
@@ -481,8 +535,16 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             if not khoan_text:
                 continue
             
+            # Build a unique chunk_id suffix.
+            # Use full khoan_no (dots → underscores) to distinguish "1.1" from "2.1".
+            # Add a counter suffix when the same label appears more than once in the
+            # same article (e.g. a numbered list that resets mid-article in DOCX).
+            base_suffix = khoan_no.replace('.', '_')
+            count = seen_suffixes.get(base_suffix, 0)
+            seen_suffixes[base_suffix] = count + 1
+            chunk_id_suffix = base_suffix if count == 0 else f"{base_suffix}_{count}"
             out = dict(chunk)
-            out['chunk_id'] = f"{chunk['chunk_id']}_k{khoan_final}"
+            out['chunk_id'] = f"{chunk['chunk_id']}_k{chunk_id_suffix}"
             out['article_number'] = f"{dieu_no}.{khoan_final}"
             out['dieu_number'] = dieu_no
             out['khoan_number'] = khoan_final

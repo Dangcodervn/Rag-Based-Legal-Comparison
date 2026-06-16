@@ -72,7 +72,7 @@ export default function CompareTab({
 
       {result && !isLoading && (
         <>
-          <MetricsSummary config={result.config} />
+          <MetricsSummary config={result.config} results={result.results} />
 
           {/* Filter bar */}
           <div className="flex items-center gap-2 flex-wrap">

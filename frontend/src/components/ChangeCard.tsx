@@ -53,12 +53,60 @@ export default function ChangeCard({ item }: Props) {
             >
               {STATUS_LABELS[item.status] ?? item.status}
             </span>
-            <span className="text-sm font-semibold text-slate-700">
-              Điều {item.dieu_number ?? item.article_number}
-              {item.khoan_number && item.khoan_number !== "0"
-                ? ` – Khoản ${item.khoan_number}`
-                : ""}
-            </span>
+
+            {/* V1 location — only items that actually exist in V1 */}
+            {!item.v2_only && (
+              <span className="inline-flex items-center gap-1">
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 leading-none">
+                  V1
+                </span>
+                <span className="text-sm font-semibold text-slate-700">
+                  Điều {item.dieu_number ?? item.article_number}
+                  {item.khoan_number && item.khoan_number !== "0"
+                    ? ` – Khoản ${item.khoan_number}`
+                    : ""}
+                </span>
+              </span>
+            )}
+
+            {/* V2 location */}
+            {item.status !== "removed" &&
+              item.matched_article_v2 &&
+              (() => {
+                // For v2_only items, dieu_number/khoan_number ARE the V2 coords.
+                // For matched items, parse from matched_article_v2.
+                let v2Dieu: string;
+                let v2Khoan: string | null;
+                if (item.v2_only) {
+                  v2Dieu = item.dieu_number ?? item.article_number;
+                  v2Khoan =
+                    item.khoan_number && item.khoan_number !== "0"
+                      ? item.khoan_number
+                      : null;
+                } else {
+                  const v2Parts = item.matched_article_v2.split(".");
+                  v2Dieu = v2Parts[0];
+                  v2Khoan =
+                    v2Parts.length > 1 ? v2Parts.slice(1).join(".") : null;
+                }
+                return (
+                  <>
+                    {!item.v2_only && (
+                      <span className="text-slate-400 text-xs">→</span>
+                    )}
+                    <span className="inline-flex items-center gap-1">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-100 text-orange-700 leading-none">
+                        V2
+                      </span>
+                      <span className="text-sm font-semibold text-slate-500">
+                        Điều {v2Dieu}
+                        {v2Khoan ? ` – Khoản ${v2Khoan}` : ""}
+                      </span>
+                    </span>
+                  </>
+                );
+              })()}
+
             {item.article_title && (
               <span className="text-sm text-slate-500 truncate">
                 {item.article_title}

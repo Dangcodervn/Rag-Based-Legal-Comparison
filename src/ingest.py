@@ -181,6 +181,15 @@ def _render_numbering_label(num_id, ilvl, numbering_data, counters_by_num):
     levels = numbering_data["abstract_levels"].get(abstract_id, {}) if abstract_id is not None else {}
     level_info = levels.get(ilvl, {})
     counters = counters_by_num[num_id]
+    # Some DOCX templates use lvlText patterns like "%1.%2.%3" while
+    # paragraphs start directly at deeper levels (missing explicit ancestors).
+    # Backfill missing ancestor counters with their configured start value so
+    # labels are fully materialized (e.g. "1.2.1" instead of "%1.%2.1").
+    for level in range(ilvl):
+        if level in counters:
+            continue
+        ancestor_start = levels.get(level, {}).get("start", 1)
+        counters[level] = ancestor_start
     start = level_info.get("start", 1)
     counters[ilvl] = counters.get(ilvl, start - 1) + 1
     for level in list(counters):
@@ -244,8 +253,12 @@ def read_docx_document(path: Path) -> dict:
                 num_id, ilvl, numbering_data, counters_by_num,
             )
         display_text = text
-        if heading_level in {1, 2, 3} and numbering_label:
-            display_text = f"{numbering_label} {text}".strip()
+        if numbering_label:
+            # Word auto-numbering often stores labels in numbering XML, not in
+            # paragraph text. Prefix display_text for ALL numbered paragraphs
+            # (not just Heading styles) so downstream chunking can detect Điều/Khoản.
+            if not text.startswith(numbering_label):
+                display_text = f"{numbering_label} {text}".strip()
         paragraphs.append({
             "idx": idx, "text": text, "display_text": display_text,
             "style_name": style_name, "style_id": style_id,

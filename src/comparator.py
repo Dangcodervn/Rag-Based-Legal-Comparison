@@ -29,6 +29,13 @@ from configs.defaults import COSINE_LOW, COSINE_HIGH
 COSINE_WEIGHT = 0.70
 BM25_WEIGHT   = 0.30
 
+# Minimum difflib text-similarity ratio for a P2 (exact-number) match to be
+# accepted.  When V1 and V2 share the same article number but body content is
+# fundamentally different (e.g. an article was replaced), the ratio will be
+# very low and P2 is rejected so P3 (hybrid BM25+Cosine) can find a better
+# semantic match — or correctly mark the clause as removed/added.
+P2_MIN_TEXT_SIMILARITY = 0.25
+
 
 # ── Text helpers ─────────────────────────────────────────────────────
 
@@ -384,35 +391,31 @@ def compare_articles_with_vector_retrieval(
     left_numbers   = sorted(left_articles.keys(), key=article_sort_key)
     matched_right: set[str] = set()
 
-    # ── Build title → article_no reverse index for V2 ────────────────
-    # Used as Priority 1 matching to handle unnumbered synthetic sections
-    # where sequential numbering can shift after inserts/deletes.
-    right_title_idx: dict[str, str] = {}
-    for _no, _art in right_articles.items():
-        _key = normalize_ws(_art.get('article_title', '')).upper().strip()
-        if _key:
-            right_title_idx[_key] = _no
-
-    def _is_synthetic_section(article_no: str, article: dict) -> bool:
-        """True for auto-generated unnumbered sections (non-Điều)."""
-        clause_id = str(article.get('clause_id') or '').strip().lower()
-        if clause_id.startswith('section_'):
-            return True
-        # Backward compatibility for older outputs that used S-prefix.
-        return article_no.startswith('S') and article_no[1:].isdigit()
-
     # ── Opt 1: single ChromaDB connection ────────────────────────────
     collection = get_collection(chroma_dir, collection_name)
 
     # ── Opt 2: batch-embed articles that need vector search ──────────
-    # Synthetic unnumbered sections need vector when title has no V2 match;
-    # Điều-numbered articles need vector only when the number is absent in V2.
+    # P2 (exact key match) is only accepted when body-text similarity ≥
+    # P2_MIN_TEXT_SIMILARITY.  Pre-compute which P2 candidates are valid so
+    # that rejected ones are included in needs_vector for P3.
+    p2_valid: set[str] = set()
+    for _no in left_numbers:
+        if _no in right_articles:
+            _lbody = normalize_ws(_body_text(
+                left_articles[_no]['full_text'],
+                left_articles[_no].get('article_title', ''),
+            ))
+            _rbody = normalize_ws(_body_text(
+                right_articles[_no]['full_text'],
+                right_articles[_no].get('article_title', ''),
+            ))
+            ratio = difflib.SequenceMatcher(None, _lbody, _rbody).ratio()
+            if ratio >= P2_MIN_TEXT_SIMILARITY:
+                p2_valid.add(_no)
+
     def _needs_vector_search(no: str) -> bool:
-        left_article = left_articles[no]
-        if _is_synthetic_section(no, left_article):
-            title_key = normalize_ws(left_articles[no].get('article_title', '')).upper().strip()
-            return title_key not in right_title_idx
-        return no not in right_articles
+        # Need vector search when no P2 valid match exists.
+        return no not in p2_valid
 
     needs_vector = [no for no in left_numbers if _needs_vector_search(no)]
     pre_embeddings: dict[str, list[float]] = {}
@@ -447,24 +450,9 @@ def compare_articles_with_vector_retrieval(
         result_order.append(article_no)
 
         chosen = None
-        # Priority 1: Title exact match (case-insensitive, normalized).
-        # Critical for unnumbered-heading documents (contracts/NDAs) where
-        # synthetic section numbering can shift when sections are added/removed.
-        left_title_key = normalize_ws(left.get('article_title', '')).upper().strip()
-        if _is_synthetic_section(article_no, left) and left_title_key:
-            tm = right_title_idx.get(left_title_key)
-            if tm and tm not in matched_right:
-                right_same = right_articles[tm]
-                chosen = {
-                    'article_number': tm,
-                    'article_title':  right_same['article_title'],
-                    'text':           right_same['full_text'],
-                    'similarity':     1.0,
-                }
-
-        # Priority 2: Điều-number exact match (skip synthetic sections — unreliable).
-        if chosen is None and not _is_synthetic_section(article_no, left) \
-                and article_no in right_articles and article_no not in matched_right:
+        # Priority 2: Điều-number exact match — only when body texts are
+        # semantically similar enough (ratio ≥ P2_MIN_TEXT_SIMILARITY).
+        if article_no in p2_valid and article_no not in matched_right:
             right_same = right_articles[article_no]
             chosen = {
                 'article_number': article_no,
@@ -640,6 +628,7 @@ def compare_articles_with_vector_retrieval(
             'article_title':      t['title'],
             'matched_article_v2': t['matched_no'],
             'match_score':        round(float(t['similarity']), 4),
+            'v2_only':            t.get('v2_only', False),
             **llm_r,
             # Use full texts (with heading) for display/side-by-side viewer
             'v1_text': t.get('v1_text_full', t['before']),

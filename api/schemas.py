@@ -16,6 +16,7 @@ class ComparisonItem(BaseModel):
     status: str
     match_score: float = 0.0
     matched_article_v2: str | None = None
+    v2_only: bool = False
     conclusion: str = ""
     grounded: bool = False
     llm_used: bool = False

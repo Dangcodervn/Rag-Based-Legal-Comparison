@@ -18,6 +18,8 @@ export interface ComparisonItem {
   grounded: boolean;
   llm_used: boolean;
   evidence: EvidenceItem[];
+  /** True when this item only exists in V2 (added). dieu_number/khoan_number are V2 coordinates. */
+  v2_only?: boolean;
 }
 
 export interface ReportConfig {

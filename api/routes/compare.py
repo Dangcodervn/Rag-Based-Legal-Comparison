@@ -93,6 +93,7 @@ def _map_item(item: dict) -> ComparisonItem:
         status=item.get("status", ""),
         match_score=float(item.get("match_score") or 0.0),
         matched_article_v2=item.get("matched_article_v2"),
+        v2_only=bool(item.get("v2_only", False)),
         conclusion=item.get("conclusion", ""),
         grounded=bool(item.get("grounded")),
         llm_used=bool(item.get("llm_used")),
