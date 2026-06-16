@@ -524,11 +524,14 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             if not body:
                 continue
             out = dict(chunk)
+            for _k in ('chunk_type', 'chuong_so', 'muc_so', 'khoan_count',
+                       'khoan_items', 'char_len'):
+                out.pop(_k, None)
             out['dieu_number'] = dieu_no
             out['khoan_number'] = '0'
             out['text'] = body
-            out['char_len'] = len(body)
-            out['khoan_items'] = []
+            out['diem_count'] = 0
+            out['tieu_muc_count'] = 0
             result.append(out)
             continue
 
@@ -563,13 +566,16 @@ def explode_to_khoan_chunks(chunks: list[dict]) -> list[dict]:
             seen_suffixes[base_suffix] = count + 1
             chunk_id_suffix = base_suffix if count == 0 else f"{base_suffix}_{count}"
             out = dict(chunk)
+            for _k in ('chunk_type', 'chuong_so', 'muc_so', 'khoan_count',
+                       'khoan_items', 'char_len'):
+                out.pop(_k, None)
             out['chunk_id'] = f"{chunk['chunk_id']}_k{chunk_id_suffix}"
             out['article_number'] = f"{dieu_no}.{khoan_final}"
             out['dieu_number'] = dieu_no
             out['khoan_number'] = khoan_final
             out['text'] = khoan_text
-            out['char_len'] = len(khoan_text)
-            out['khoan_items'] = []
+            out['diem_count'] = len(khoan.get('diem_items', []))
+            out['tieu_muc_count'] = len(khoan.get('tieu_muc_items', []))
             result.append(out)
 
     return result

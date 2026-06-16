@@ -34,7 +34,19 @@ BM25_WEIGHT   = 0.30
 # fundamentally different (e.g. an article was replaced), the ratio will be
 # very low and P2 is rejected so P3 (hybrid BM25+Cosine) can find a better
 # semantic match — or correctly mark the clause as removed/added.
-P2_MIN_TEXT_SIMILARITY = 0.25
+P2_MIN_TEXT_SIMILARITY = 0.40
+
+# ── Article-level (Điều) anchoring ───────────────────────────────────
+# Before matching at the Khoản level, each V1 Điều is anchored to at most one
+# V2 Điều using whole-article (title + concatenated khoản body) similarity.
+# Khoản matching is then constrained to anchored Điều pairs so that a V1 khoản
+# whose Điều was deleted in V2 cannot "steal" a similar-looking khoản slot in a
+# *different* V2 Điều (cross-article contamination). A V1 Điều with no
+# acceptable anchor → all of its khoản are deterministically marked removed.
+ANCHOR_MIN_SCORE    = 0.30   # minimum combined title+body score to anchor
+ANCHOR_TITLE_WEIGHT = 0.40
+ANCHOR_BODY_WEIGHT  = 0.60
+ANCHOR_SAME_NUMBER_BONUS = 0.05  # small prior for keeping the same Điều number
 
 
 # ── Text helpers ─────────────────────────────────────────────────────
@@ -382,6 +394,75 @@ def _compare_key(body_text: str) -> str:
     return _CLAUSE_PREFIX_RE.sub('', text).strip()
 
 
+def _dieu_aggregate(articles: dict) -> dict[str, dict]:
+    """Group khoản-level articles by ``dieu_number`` into per-Điều aggregates.
+
+    Each entry concatenates the body text of every khoản belonging to the Điều
+    so that article-level anchoring can compare whole Điều against whole Điều.
+
+    Returns ``{dieu_number: {'title': str, 'body': str, 'members': [no, ...]}}``.
+    """
+    agg: dict[str, dict] = {}
+    for no, art in articles.items():
+        dieu = str(art.get('dieu_number') or no)
+        body = normalize_ws(_body_text(art.get('full_text', ''), art.get('article_title', '')))
+        if dieu not in agg:
+            agg[dieu] = {
+                'title':   normalize_ws(art.get('article_title', '')),
+                'bodies':  [],
+                'members': [],
+            }
+        if body:
+            agg[dieu]['bodies'].append(body)
+        agg[dieu]['members'].append(no)
+    for d in agg.values():
+        d['body'] = ' '.join(d['bodies'])
+    return agg
+
+
+def _anchor_dieu(left_articles: dict, right_articles: dict) -> dict[str, str | None]:
+    """Compute a 1:1 anchor mapping V1 Điều → V2 Điều.
+
+    Every V1 Điều is matched to at most one V2 Điều by combined title+body
+    similarity, assigned greedily highest-score-first so each V2 Điều is used
+    once. A V1 Điều whose best partner scores below ``ANCHOR_MIN_SCORE`` (or is
+    already taken) maps to ``None``, marking the whole article — and all of its
+    khoản — as removed. This prevents cross-article khoản contamination.
+    """
+    left_agg  = _dieu_aggregate(left_articles)
+    right_agg = _dieu_aggregate(right_articles)
+
+    scored: list[tuple[float, str, str]] = []
+    for l_dieu, l in left_agg.items():
+        l_title_u = l['title'].upper()
+        l_body    = l['body']
+        for r_dieu, r in right_agg.items():
+            title_ratio = (
+                difflib.SequenceMatcher(None, l_title_u, r['title'].upper()).ratio()
+                if (l_title_u or r['title']) else 0.0
+            )
+            body_ratio = (
+                difflib.SequenceMatcher(None, l_body, r['body']).ratio()
+                if (l_body or r['body']) else 0.0
+            )
+            score = ANCHOR_TITLE_WEIGHT * title_ratio + ANCHOR_BODY_WEIGHT * body_ratio
+            if l_dieu == r_dieu:
+                score += ANCHOR_SAME_NUMBER_BONUS
+            scored.append((score, l_dieu, r_dieu))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    anchor: dict[str, str | None] = {d: None for d in left_agg}
+    used_right: set[str] = set()
+    for score, l_dieu, r_dieu in scored:
+        if score < ANCHOR_MIN_SCORE:
+            break
+        if anchor[l_dieu] is not None or r_dieu in used_right:
+            continue
+        anchor[l_dieu] = r_dieu
+        used_right.add(r_dieu)
+    return anchor
+
+
 def compare_articles_with_vector_retrieval(
     chunks_v1: list[dict],
     chunks_v2: list[dict],
@@ -407,6 +488,18 @@ def compare_articles_with_vector_retrieval(
     left_numbers   = sorted(left_articles.keys(), key=article_sort_key)
     matched_right: set[str] = set()
 
+    # ── Step 0: article-level (Điều) anchoring ───────────────────────
+    # Anchor each V1 Điều to at most one V2 Điều so that Khoản matching below is
+    # constrained to anchored Điều pairs. dieu_anchor[v1_dieu] is the V2 Điều
+    # number (or None → the whole Điều, and all its khoản, is removed).
+    dieu_anchor = _anchor_dieu(left_articles, right_articles)
+    right_dieu_of = {
+        no: str(art.get('dieu_number') or no) for no, art in right_articles.items()
+    }
+
+    def _anchored_v2_dieu(art: dict, composite_no: str) -> str | None:
+        return dieu_anchor.get(str(art.get('dieu_number') or composite_no))
+
     # ── Opt 1: single ChromaDB connection ────────────────────────────
     collection = get_collection(chroma_dir, collection_name)
 
@@ -417,6 +510,10 @@ def compare_articles_with_vector_retrieval(
     p2_valid: set[str] = set()
     for _no in left_numbers:
         if _no in right_articles:
+            # Anchor guard: an exact composite-key match is only valid when the
+            # V1 Điều is anchored to the V2 Điều that this key belongs to.
+            if _anchored_v2_dieu(left_articles[_no], _no) != right_dieu_of.get(_no):
+                continue
             _lbody = normalize_ws(_body_text(
                 left_articles[_no]['full_text'],
                 left_articles[_no].get('article_title', ''),
@@ -481,7 +578,11 @@ def compare_articles_with_vector_retrieval(
             }
 
         # Priority 3: hybrid BM25+Cosine (uses pre-computed embedding)
-        if chosen is None and article_no in pre_embeddings:
+        # Constrained to the V2 Điều this V1 Điều is anchored to (Step 0). When
+        # the V1 Điều has no anchor (anchored_v2_dieu is None) every candidate
+        # is rejected, so the khoản falls through to removed.
+        anchored_v2_dieu = _anchored_v2_dieu(left, article_no)
+        if chosen is None and anchored_v2_dieu is not None and article_no in pre_embeddings:
             candidates = query_with_vector(
                 pre_embeddings[article_no], collection, 'v2', top_k,
             )
@@ -503,6 +604,7 @@ def compare_articles_with_vector_retrieval(
                 (_hybrid_score(cosine_by_no.get(n, 0.0), bm25_scores_raw.get(n, 0.0)), n)
                 for n in candidate_nos
                 if n not in matched_right
+                and right_dieu_of.get(n) == anchored_v2_dieu
                 and _hybrid_score(cosine_by_no.get(n, 0.0), bm25_scores_raw.get(n, 0.0)) >= threshold
             ]
             scored.sort(key=lambda x: x[0], reverse=True)
